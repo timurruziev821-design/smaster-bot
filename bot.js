@@ -3,14 +3,16 @@ const { createClient } = require('@supabase/supabase-js');
 const http = require('http');
 const https = require('https');
 
+// --- ВЕБ-СЕРВЕР ---
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('SMaster Bot is running!');
 }).listen(PORT, () => console.log('Веб-сервер на порту ' + PORT));
 
+// --- НАСТРОЙКИ ---
 const TOKEN = process.env.SMASTER_BOT_TOKEN;
-const SUPABASE_URL = 'https://dnrbvyuoiphvkezwxbc.supabase.co';
+const SUPABASE_URL = 'https://dnrbvyuoiiphvkezwxbc.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const CRYPTOBOT_TOKEN = process.env.CRYPTOBOT_TOKEN;
 const ADMIN_ID = 8447147405;
@@ -25,8 +27,9 @@ bot.setMyCommands([
     { command: 'wallet', description: '💼 Мой кошелек' },
     { command: 'deposit', description: '💳 Пополнить' },
     { command: 'send', description: '📤 Перевести' },
-    { command: 'play', description: '🚀 Игра Ракета' },
+    { command: 'play', description: '🚀 Ракета' },
     { command: 'ref', description: '🎁 Рефералка' },
+    { command: 'promo', description: '🎟 Промокод' },
     { command: 'help', description: '❓ Помощь' }
 ]);
 
@@ -35,8 +38,9 @@ const mainMenu = {
         keyboard: [
             [{ text: '💼 Мой кошелек' }, { text: '💳 Пополнить' }],
             [{ text: '📤 Перевести' }, { text: '🚀 Ракета' }],
-            [{ text: '🎁 Рефералка' }, { text: '📊 Курсы' }],
-            [{ text: '📱 Открыть App' }, { text: 'ℹ️ О боте' }]
+            [{ text: '🎁 Рефералка' }, { text: '🎟 Промокод' }],
+            [{ text: '📊 Курсы' }, { text: '📱 Открыть App' }],
+            [{ text: 'ℹ️ О боте' }]
         ],
         resize_keyboard: true
     }
@@ -44,6 +48,7 @@ const mainMenu = {
 
 const userStates = {};
 
+// --- ФУНКЦИЯ КОШЕЛЬКА ---
 async function showWallet(chatId) {
     let { data: wallet } = await sb.from('smaster_wallets').select('*').eq('user_id', chatId).maybeSingle();
     if (!wallet) {
@@ -55,53 +60,65 @@ async function showWallet(chatId) {
     }
 }
 
+// --- СТАРТ ---
 bot.onText(/\/start/, async (msg) => {
     await showWallet(msg.chat.id);
-    bot.sendMessage(msg.chat.id, `👋 Привет, ${msg.from.first_name || 'друг'}!\n\nДобро пожаловать в SMaster.`, mainMenu);
+    bot.sendMessage(msg.chat.id, `👋 Привет, ${msg.from.first_name || 'друг'}!\n\nДобро пожаловать в SMaster.\n\nИспользуй меню ниже.`, mainMenu);
 });
 
-bot.onText(/\/wallet/, (msg) => showWallet(msg.chat.id));bot.on('message', async (msg) => {
+// --- /wallet ---
+bot.onText(/\/wallet/, (msg) => showWallet(msg.chat.id));
+
+// --- ОСНОВНОЙ ОБРАБОТЧИК ---
+bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
+    // Кнопки
     if (text === '💼 Мой кошелек') return showWallet(chatId);
     if (text === '📊 Курсы') return bot.sendMessage(chatId, `📊 Курсы\n\n1 USDT = 1$\n1 TON = 5.2$`, mainMenu);
     if (text === 'ℹ️ О боте') return bot.sendMessage(chatId, `🦫 SMaster by Solo_Men Studios`, mainMenu);
-    if (text === '📱 Открыть App') return bot.sendMessage(chatId, `📱 Скоро будет мини-приложение!`, mainMenu);
+    if (text === '📱 Открыть App') return bot.sendMessage(chatId, `📱 Скоро здесь будет мини-приложение!`, mainMenu);
 
-    // Сброс состояний при нажатии кнопок меню
-    if (['💳 Пополнить', '📤 Перевести', '🚀 Ракета', '/deposit', '/send', '/play'].includes(text)) {
-        delete userStates[chatId];
-    }
-
+    // ПОПОЛНЕНИЕ
     if (text === '💳 Пополнить' || text === '/deposit') {
         userStates[chatId] = { step: 'deposit_amount' };
         return bot.sendMessage(chatId, '💳 Введи сумму пополнения в USDT:');
     }
 
+    // ПЕРЕВОД
     if (text === '📤 Перевести' || text === '/send') {
         userStates[chatId] = { step: 'send_username' };
         return bot.sendMessage(chatId, '📤 Введи username получателя (без @):');
     }
 
+    // РАКЕТА
     if (text === '🚀 Ракета' || text === '/play') {
         userStates[chatId] = { step: 'rocket_bet' };
         return bot.sendMessage(chatId, '🚀 Введи сумму ставки в USDT:');
     }
 
+    // РЕФЕРАЛКА
     if (text === '🎁 Рефералка') {
         return bot.sendMessage(chatId, `🎁 Твоя ссылка:\nt.me/SMasterWallet_bot?start=ref_${chatId}`, mainMenu);
     }
 
+    // ПРОМОКОД
+    if (text === '🎟 Промокод') {
+        userStates[chatId] = { step: 'promo_code' };
+        return bot.sendMessage(chatId, '🎟 Введи промокод:');
+    }
+
+    // Обработка состояний
     if (!userStates[chatId]) return;
     const state = userStates[chatId];
 
+    // --- ПОПОЛНЕНИЕ ---
     if (state.step === 'deposit_amount') {
         const amount = parseFloat(text);
-        if (isNaN(amount) || amount <= 0) return bot.sendMessage(chatId, '❌ Введи корректную сумму:');
-        bot.sendMessage(chatId, '⏳ Создаю счет...');
+        if (isNaN(amount) || amount <= 0) return bot.sendMessage(chatId, '❌ Введи сумму:');
         const invoice = await createCryptoInvoice(amount, 'Пополнение SMaster');
-        if (invoice && invoice.bot_invoice_url) {
+        if (invoice) {
             bot.sendMessage(chatId, `💳 Счет на ${amount} USDT:`, { reply_markup: { inline_keyboard: [[{ text: `Оплатить`, url: invoice.bot_invoice_url }]] } });
         } else {
             bot.sendMessage(chatId, '❌ Ошибка.', mainMenu);
@@ -110,12 +127,12 @@ bot.onText(/\/wallet/, (msg) => showWallet(msg.chat.id));bot.on('message', async
         return;
     }
 
+    // --- ПЕРЕВОД ---
     if (state.step === 'send_username') {
         state.targetUser = text.toLowerCase().replace('@', '');
         state.step = 'send_amount';
-        return bot.sendMessage(chatId, '💰 Введи сумму:');
+        return bot.sendMessage(chatId, '💰 Введи сумму перевода в USDT:');
     }
-
     if (state.step === 'send_amount') {
         const amount = parseFloat(text);
         if (isNaN(amount) || amount <= 0) return bot.sendMessage(chatId, '❌ Введи сумму:');
@@ -131,6 +148,7 @@ bot.onText(/\/wallet/, (msg) => showWallet(msg.chat.id));bot.on('message', async
         return;
     }
 
+    // --- РАКЕТА ---
     if (state.step === 'rocket_bet') {
         const amount = parseFloat(text);
         if (isNaN(amount) || amount <= 0) return bot.sendMessage(chatId, '❌ Введи сумму:');
@@ -147,7 +165,21 @@ bot.onText(/\/wallet/, (msg) => showWallet(msg.chat.id));bot.on('message', async
         delete userStates[chatId];
         return;
     }
-});function createCryptoInvoice(amount, description) {
+
+    // --- ПРОМОКОД ---
+    if (state.step === 'promo_code') {
+        const code = text.toUpperCase();
+        const { data: promo } = await sb.from('promo_codes').select('*').eq('code', code).eq('active', true).maybeSingle();
+        if (!promo) return bot.sendMessage(chatId, '❌ Неверный промокод.', mainMenu);
+        const { data: wallet } = await sb.from('smaster_wallets').select('*').eq('user_id', chatId).single();
+        await sb.from('smaster_wallets').update({ balance_usdt: wallet.balance_usdt + promo.bonus }).eq('user_id', chatId);
+        await sb.from('promo_codes').update({ active: false }).eq('id', promo.id);
+        bot.sendMessage(chatId, `🎉 Промокод активирован! +${promo.bonus} USDT`, mainMenu);
+        delete userStates[chatId];
+        return;
+    }
+});// --- ФУНКЦИЯ СОЗДАНИЯ СЧЕТА ---
+function createCryptoInvoice(amount, description) {
     return new Promise((resolve) => {
         const body = JSON.stringify({ asset: 'USDT', amount: String(amount), description: description });
         const req = https.request({
@@ -166,17 +198,10 @@ bot.onText(/\/wallet/, (msg) => showWallet(msg.chat.id));bot.on('message', async
     });
 }
 
-// АДМИНКА
+// --- АДМИН-ПАНЕЛЬ ---
 bot.onText(/\/admin/, (msg) => {
     if (msg.chat.id !== ADMIN_ID) return;
-    bot.sendMessage(msg.chat.id, `👑 Админка:\n/admin_broadcast текст\n/admin_addbalance ID сумма`);
-});
-
-bot.onText(/\/admin_broadcast (.+)/, (msg, match) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    const allUsers = await sb.from('smaster_wallets').select('user_id');
-    allUsers.data.forEach(u => bot.sendMessage(u.user_id, match[1]).catch(() => {}));
-    bot.sendMessage(msg.chat.id, '✅ Рассылка отправлена!');
+    bot.sendMessage(msg.chat.id, `👑 Админка:\n/admin_addbalance ID сумма\n/admin_broadcast текст\n/admin_addpromo КОД БОНУС`);
 });
 
 bot.onText(/\/admin_addbalance (\d+) (\d+)/, async (msg, match) => {
@@ -185,3 +210,22 @@ bot.onText(/\/admin_addbalance (\d+) (\d+)/, async (msg, match) => {
     await sb.from('smaster_wallets').update({ balance_usdt: amount }).eq('user_id', id);
     bot.sendMessage(msg.chat.id, `✅ Выдано ${amount} USDT пользователю ${id}`);
 });
+
+bot.onText(/\/admin_broadcast (.+)/, async (msg, match) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    const allUsers = await sb.from('smaster_wallets').select('user_id');
+    allUsers.data.forEach(u => bot.sendMessage(u.user_id, match[1]).catch(() => {}));
+    bot.sendMessage(msg.chat.id, '✅ Рассылка отправлена!');
+});
+
+bot.onText(/\/admin_addpromo (\S+) (\d+)/, async (msg, match) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    const code = match[1].toUpperCase(), bonus = parseFloat(match[2]);
+    await sb.from('promo_codes').insert({ code: code, bonus: bonus, active: true });
+    bot.sendMessage(msg.chat.id, `✅ Промокод ${code} создан!`);
+});CREATE TABLE IF NOT EXISTS promo_codes (
+    id SERIAL PRIMARY KEY,
+    code TEXT UNIQUE,
+    bonus NUMERIC DEFAULT 0,
+    active BOOLEAN DEFAULT true
+);
