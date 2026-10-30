@@ -223,9 +223,4 @@ bot.onText(/\/admin_addpromo (\S+) (\d+)/, async (msg, match) => {
     const code = match[1].toUpperCase(), bonus = parseFloat(match[2]);
     await sb.from('promo_codes').insert({ code: code, bonus: bonus, active: true });
     bot.sendMessage(msg.chat.id, `✅ Промокод ${code} создан!`);
-});CREATE TABLE IF NOT EXISTS promo_codes (
-    id SERIAL PRIMARY KEY,
-    code TEXT UNIQUE,
-    bonus NUMERIC DEFAULT 0,
-    active BOOLEAN DEFAULT true
-);
+
