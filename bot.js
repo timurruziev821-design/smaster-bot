@@ -47,20 +47,36 @@ const mainMenu = {
 
 const userStates = {};
 
-// --- ФУНКЦИЯ СОЗДАНИЯ КОШЕЛЬКА (если его нет) ---
-async function ensureWallet(chatId, username) {
-    let { data: wallet } = await sb.from('smaster_wallets').select('*').eq('user_id', chatId).maybeSingle();
-    if (!wallet) {
-        const { data: newWallet, error } = await sb.from('smaster_wallets').insert({
-            user_id: chatId,
-            username: username || 'unknown',
-            balance_usdt: 0,
-            balance_ton: 0
-        }).select().single();
-        if (error) console.log('Ошибка создания кошелька:', error);
-        return newWallet;
+async function showWallet(chatId) {
+    const { data: wallet, error } = await sb.from('smaster_wallets').select('*').eq('user_id', chatId).maybeSingle();
+    
+    if (error) {
+        console.log('Ошибка базы:', error);
+        bot.sendMessage(chatId, '⚠️ Ошибка базы данных. Попробуй позже.', mainMenu);
+        return;
     }
-    return wallet;
+
+    if (!wallet) {
+        // Если кошелька нет, создаем его прямо сейчас
+        const { data: newWallet, error: createError } = await sb.from('smaster_wallets').insert({
+            user_id: chatId, username: 'user', balance_usdt: 0, balance_ton: 0
+        }).select().single();
+        
+        if (createError) {
+            bot.sendMessage(chatId, '⚠️ Не удалось создать кошелек. Напиши /start.', mainMenu);
+            return;
+        }
+        bot.sendMessage(chatId, `💼 Кошелек создан!\n\n💵 USDT: 0.00 $\n💎 TON: 0.00 TON`, mainMenu);
+        return;
+    }
+
+    bot.sendMessage(chatId, 
+        `💼 Твой кошелек SMaster\n\n` +
+        `💵 USDT: ${wallet.balance_usdt.toFixed(2)} $\n` +
+        `💎 TON: ${wallet.balance_ton.toFixed(2)} TON\n\n` +
+        `🆔 Твой ID: ${wallet.user_id}`,
+        mainMenu
+    );
 }
 
 // --- /start (и кнопка Кошелек) ---
