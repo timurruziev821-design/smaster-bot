@@ -3,12 +3,14 @@ const { createClient } = require('@supabase/supabase-js');
 const http = require('http');
 const https = require('https');
 
+// --- ВЕБ-СЕРВЕР (Чтобы Render не убивал бота) ---
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('SMaster Bot is running!');
 }).listen(PORT, () => console.log('Веб-сервер на порту ' + PORT));
 
+// --- НАСТРОЙКИ ---
 const TOKEN = process.env.SMASTER_BOT_TOKEN;
 const SUPABASE_URL = 'https://dnrbvyuoiphvkezwxbc.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -26,7 +28,6 @@ bot.setMyCommands([
     { command: 'deposit', description: '💳 Пополнить' },
     { command: 'send', description: '📤 Перевести' },
     { command: 'play', description: '🚀 Ракета' },
-    { command: 'ref', description: '🎁 Рефералка' },
     { command: 'help', description: '❓ Помощь' }
 ]);
 
@@ -35,119 +36,168 @@ const mainMenu = {
         keyboard: [
             [{ text: '💼 Мой кошелек' }, { text: '💳 Пополнить' }],
             [{ text: '📤 Перевести' }, { text: '🚀 Ракета' }],
-            [{ text: '🎁 Рефералка' }, { text: '📊 Курсы' }],
-            [{ text: '📱 Открыть App' }, { text: 'ℹ️ О боте' }]
+            [{ text: '🎁 Рефералка' }, { text: '📊 Курсы' }]
         ],
         resize_keyboard: true
     }
 };
 
-const userStates = {};
+const sessions = {};
 
-async function showWallet(chatId) {
+// --- СОЗДАНИЕ / ПРОВЕРКА КОШЕЛЬКА ---
+async function ensureWallet(chatId, username) {
     let { data: wallet } = await sb.from('smaster_wallets').select('*').eq('user_id', chatId).maybeSingle();
     if (!wallet) {
-        const { data: newWallet } = await sb.from('smaster_wallets').insert({ user_id: chatId, username: 'user', balance_usdt: 0, balance_ton: 0 }).select().single();
-        wallet = newWallet;
+        const { data: newWallet } = await sb.from('smaster_wallets').insert({
+            user_id: chatId, username: username || 'user', balance_usdt: 0, balance_ton: 0
+        }).select().single();
+        return newWallet;
     }
+    return wallet;
+}
+
+// --- ПОКАЗ БАЛАНСА ---
+async function showWallet(chatId, userId, username) {
+    const wallet = await ensureWallet(userId, username);
     if (wallet) {
-        bot.sendMessage(chatId, `💼 Твой кошелек SMaster\n\n💵 USDT: ${wallet.balance_usdt.toFixed(2)} $\n💎 TON: ${wallet.balance_ton.toFixed(2)} TON\n\n🆔 Твой ID: ${wallet.user_id}`, mainMenu);
+        bot.sendMessage(chatId, 
+            `💼 Твой кошелек SMaster\n\n` +
+            `💵 USDT: ${Number(wallet.balance_usdt).toFixed(2)} $\n` +
+            `💎 TON: ${Number(wallet.balance_ton).toFixed(2)} TON\n\n` +
+            `🆔 Твой ID: ${wallet.user_id}`, 
+            mainMenu
+        );
+    } else {
+        bot.sendMessage(chatId, '❌ Ошибка загрузки кошелька.', mainMenu);
     }
 }
 
+// --- КОМАНДЫ ---
 bot.onText(/\/start/, async (msg) => {
-    await showWallet(msg.chat.id);
-    bot.sendMessage(msg.chat.id, `👋 Привет, ${msg.from.first_name || 'друг'}!\n\nДобро пожаловать в SMaster.`, mainMenu);
+    delete sessions[msg.from.id];
+    const wallet = await ensureWallet(msg.from.id, msg.from.username);
+    if(wallet) {
+        bot.sendMessage(msg.chat.id, `👋 Привет, ${msg.from.first_name || 'друг'}!\n\nДобро пожаловать в SMaster. Выбери действие на клавиатуре снизу.`, mainMenu);
+    }
 });
 
-bot.onText(/\/wallet/, (msg) => showWallet(msg.chat.id));
+bot.onText(/\/wallet/, async (msg) => {
+    delete sessions[msg.from.id];
+    await showWallet(msg.chat.id, msg.from.id, msg.from.username);
+});
 
+// --- ОБРАБОТКА СООБЩЕНИЙ И КНОПОК ---
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
+    const userId = msg.from.id;
     const text = msg.text;
 
-    if (text === '💼 Мой кошелек') return showWallet(chatId);
-    if (text === '📊 Курсы') return bot.sendMessage(chatId, `📊 Курсы\n\n1 USDT = 1$\n1 TON = 5.2$`, mainMenu);
-    if (text === 'ℹ️ О боте') return bot.sendMessage(chatId, `🦫 SMaster by Solo_Men Studios`, mainMenu);
-    if (text === '📱 Открыть App') return bot.sendMessage(chatId, `📱 Скоро будет мини-приложение!`, mainMenu);
+    // Если пользователь нажимает на кнопку меню, сбрасываем любые ожидания
+    const menuButtons = ['💼 Мой кошелек', '💳 Пополнить', '📤 Перевести', '🚀 Ракета', '🎁 Рефералка', '📊 Курсы'];
+    if (menuButtons.includes(text)) {
+        delete sessions[userId];
+    }
 
-    if (text === '💳 Пополнить' || text === '/deposit') {
-        userStates[chatId] = { step: 'deposit_amount' };
+    // Обработка кнопок меню
+    if (text === '💼 Мой кошелек') return await showWallet(chatId, userId, msg.from.username);
+    if (text === '📊 Курсы') return bot.sendMessage(chatId, `📊 Курсы\n\n1 USDT = 1$\n1 TON = 5.2$`, mainMenu);
+    if (text === '🎁 Рефералка') return bot.sendMessage(chatId, `🎁 Твоя ссылка:\nt.me/SMasterWallet_bot?start=ref_${userId}`, mainMenu);
+
+    if (text === '💳 Пополнить') {
+        sessions[userId] = { action: 'deposit' };
         return bot.sendMessage(chatId, '💳 Введи сумму пополнения в USDT:');
     }
 
-    if (text === '📤 Перевести' || text === '/send') {
-        userStates[chatId] = { step: 'send_username' };
+    if (text === '📤 Перевести') {
+        sessions[userId] = { action: 'send_user' };
         return bot.sendMessage(chatId, '📤 Введи username получателя (без @):');
     }
 
-    if (text === '🚀 Ракета' || text === '/play') {
-        userStates[chatId] = { step: 'rocket_bet' };
+    if (text === '🚀 Ракета') {
+        sessions[userId] = { action: 'rocket' };
         return bot.sendMessage(chatId, '🚀 Введи сумму ставки в USDT:');
     }
 
-    if (text === '🎁 Рефералка') {
-        return bot.sendMessage(chatId, `🎁 Твоя ссылка:\nt.me/SMasterWallet_bot?start=ref_${chatId}`, mainMenu);
-    }
+    // --- ЛОГИКА ОЖИДАНИЯ ВВОДА ---
+    const session = sessions[userId];
+    if (!session) return; // Если ничего не ждем - игнорируем текст
 
-    if (!userStates[chatId]) return;
-    const state = userStates[chatId];
-
-    if (state.step === 'deposit_amount') {
+    // Пополнение
+    if (session.action === 'deposit') {
         const amount = parseFloat(text);
-        if (isNaN(amount) || amount <= 0) return bot.sendMessage(chatId, '❌ Введи корректную сумму:');
-        const invoice = await createCryptoInvoice(amount, 'Пополнение SMaster');
+        if (isNaN(amount) || amount <= 0) return bot.sendMessage(chatId, '❌ Введи число:');
+        
+        delete sessions[userId];
+        bot.sendMessage(chatId, '⏳ Создаю счет...');
+        const invoice = await createCryptoInvoice(amount);
+        
         if (invoice && invoice.bot_invoice_url) {
-            bot.sendMessage(chatId, `💳 Счет на ${amount} USDT:`, { reply_markup: { inline_keyboard: [[{ text: 'Оплатить', url: invoice.bot_invoice_url }]] } });
+            bot.sendMessage(chatId, `💳 Счет на ${amount} USDT:`, { 
+                reply_markup: { inline_keyboard: [[{ text: 'Оплатить', url: invoice.bot_invoice_url }]] } 
+            });
         } else {
-            bot.sendMessage(chatId, '❌ Ошибка.', mainMenu);
+            bot.sendMessage(chatId, '❌ Ошибка CryptoBot.', mainMenu);
         }
-        delete userStates[chatId];
         return;
     }
 
-    if (state.step === 'send_username') {
-        state.targetUser = text.toLowerCase().replace('@', '');
-        state.step = 'send_amount';
+    // Перевод (Шаг 1: Ник)
+    if (session.action === 'send_user') {
+        session.targetUser = text.toLowerCase().replace('@', '');
+        session.action = 'send_amount';
         return bot.sendMessage(chatId, '💰 Введи сумму перевода в USDT:');
     }
 
-    if (state.step === 'send_amount') {
+    // Перевод (Шаг 2: Сумма)
+    if (session.action === 'send_amount') {
         const amount = parseFloat(text);
-        if (isNaN(amount) || amount <= 0) return bot.sendMessage(chatId, '❌ Введи сумму:');
-        const { data: sender } = await sb.from('smaster_wallets').select('*').eq('user_id', chatId).single();
-        if (!sender || sender.balance_usdt < amount) return bot.sendMessage(chatId, '❌ Мало денег.', mainMenu);
-        const { data: receiver } = await sb.from('smaster_wallets').select('*').eq('username', state.targetUser).maybeSingle();
-        if (!receiver) return bot.sendMessage(chatId, '❌ Не найден.', mainMenu);
+        if (isNaN(amount) || amount <= 0) return bot.sendMessage(chatId, '❌ Введи число:');
+
+        const { data: sender } = await sb.from('smaster_wallets').select('*').eq('user_id', userId).single();
+        if (!sender || Number(sender.balance_usdt) < amount) return bot.sendMessage(chatId, '❌ Недостаточно средств.', mainMenu);
+        
+        const { data: receiver } = await sb.from('smaster_wallets').select('*').eq('username', session.targetUser).maybeSingle();
+        if (!receiver) return bot.sendMessage(chatId, '❌ Пользователь не найден.', mainMenu);
+        
         const fee = amount * 0.01;
-        await sb.from('smaster_wallets').update({ balance_usdt: sender.balance_usdt - amount }).eq('user_id', chatId);
-        await sb.from('smaster_wallets').update({ balance_usdt: receiver.balance_usdt + (amount - fee) }).eq('user_id', receiver.user_id);
-        bot.sendMessage(chatId, `✅ Перевод выполнен!`, mainMenu);
-        delete userStates[chatId];
+        const totalToReceive = amount - fee;
+
+        await sb.from('smaster_wallets').update({ balance_usdt: Number(sender.balance_usdt) - amount }).eq('user_id', userId);
+        await sb.from('smaster_wallets').update({ balance_usdt: Number(receiver.balance_usdt) + totalToReceive }).eq('user_id', receiver.user_id);
+        
+        delete sessions[userId];
+        bot.sendMessage(chatId, `✅ Перевод выполнен!\nОтправлено: ${amount} USDT\nКомиссия: ${fee.toFixed(2)} USDT`, mainMenu);
         return;
     }
 
-    if (state.step === 'rocket_bet') {
+    // Ракета
+    if (session.action === 'rocket') {
         const amount = parseFloat(text);
-        if (isNaN(amount) || amount <= 0) return bot.sendMessage(chatId, '❌ Введи сумму:');
-        const { data: wallet } = await sb.from('smaster_wallets').select('*').eq('user_id', chatId).single();
-        if (!wallet || wallet.balance_usdt < amount) return bot.sendMessage(chatId, '❌ Мало денег.', mainMenu);
+        if (isNaN(amount) || amount <= 0) return bot.sendMessage(chatId, '❌ Введи число:');
+
+        const { data: wallet } = await sb.from('smaster_wallets').select('*').eq('user_id', userId).single();
+        if (!wallet || Number(wallet.balance_usdt) < amount) return bot.sendMessage(chatId, '❌ Недостаточно средств.', mainMenu);
+
+        delete sessions[userId];
+        
+        // Шанс 1 на миллион
         const isWin = Math.random() < 0.000001;
+        
         if (isWin) {
-            await sb.from('smaster_wallets').update({ balance_usdt: wallet.balance_usdt + (amount * 100) }).eq('user_id', chatId);
-            bot.sendMessage(chatId, `🚀 ДЖЕКПОТ! +${amount * 100} USDT!`, mainMenu);
+            await sb.from('smaster_wallets').update({ balance_usdt: Number(wallet.balance_usdt) + (amount * 100) }).eq('user_id', userId);
+            bot.sendMessage(chatId, `🚀 ДЖЕКПОТ! Ты выиграл ${amount * 100} USDT!`, mainMenu);
         } else {
-            await sb.from('smaster_wallets').update({ balance_usdt: wallet.balance_usdt - amount }).eq('user_id', chatId);
-            bot.sendMessage(chatId, `💥 Взрыв! -${amount} USDT.`, mainMenu);
+            await sb.from('smaster_wallets').update({ balance_usdt: Number(wallet.balance_usdt) - amount }).eq('user_id', userId);
+            bot.sendMessage(chatId, `💥 Ракета взорвалась! Ты потерял ${amount} USDT.`, mainMenu);
         }
-        delete userStates[chatId];
         return;
     }
 });
 
-function createCryptoInvoice(amount, description) {
+// --- CRYPTOBOT ---
+function createCryptoInvoice(amount) {
     return new Promise((resolve) => {
-        const body = JSON.stringify({ asset: 'USDT', amount: String(amount), description: description, payload: 'smaster_' + Date.now() });
+        const body = JSON.stringify({ asset: 'USDT', amount: String(amount), description: 'SMaster deposit' });
         const req = https.request({
             hostname: 'pay.crypt.bot', path: '/api/createInvoice', method: 'POST',
             headers: { 'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
@@ -164,14 +214,6 @@ function createCryptoInvoice(amount, description) {
     });
 }
 
-bot.onText(/\/cancel/, (msg) => {
-    delete userStates[msg.chat.id];
-    bot.sendMessage(msg.chat.id, '❌ Отменено.', mainMenu);
-});
-
-bot.onText(/\/admin_addbalance (\d+) (\d+)/, async (msg, match) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    const id = match[1], amount = parseFloat(match[2]);
-    await sb.from('smaster_wallets').update({ balance_usdt: amount }).eq('user_id', id);
-    bot.sendMessage(msg.chat.id, `✅ Выдано ${amount} USDT пользователю ${id}`);
-});
+// Обработка ошибок, чтобы бот не падал
+process.on('unhandledRejection', (reason, promise) => console.error('Unhandled:', reason));
+process.on('uncaughtException', (err) => console.error('Ошибка:', err));
