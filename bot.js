@@ -9,7 +9,7 @@ http.createServer((req, res) => {
     res.end('SMaster Bot is running!');
 }).listen(PORT, () => console.log('Веб-сервер на порту ' + PORT));
 
-// --- НАСТРОЙКИ (Берем из переменных Render) ---
+// --- НАСТРОЙКИ ---
 const TOKEN = process.env.SMASTER_BOT_TOKEN;
 const SUPABASE_URL = 'https://dnrbvyuoiphvkezwxbc.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -19,7 +19,7 @@ const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 console.log('SMaster запущен!');
 
-// --- КОМАНДЫ В МЕНЮ (Автоподсказки) ---
+// --- КОМАНДЫ В МЕНЮ ---
 bot.setMyCommands([
     { command: 'start', description: '🏛 Главное меню' },
     { command: 'wallet', description: '💼 Мой кошелек' },
@@ -62,9 +62,9 @@ bot.onText(/\/start/, async (msg) => {
 
     bot.sendMessage(chatId, 
         `👋 Привет, ${name}!\n\n` +
-        `Добро пожаловать в **SMaster** — твой крипто-кошелек прямо в Telegram.\n\n` +
+        `Добро пожаловать в SMaster — твой крипто-кошелек прямо в Telegram.\n\n` +
         `Здесь ты можешь хранить USDT и TON, переводить их друзьям и играть в Ракету.`,
-        { parse_mode: 'Markdown', ...mainMenu }
+        mainMenu
     );
 });
 
@@ -75,11 +75,11 @@ bot.onText(/\/wallet/, async (msg) => {
     
     if (wallet) {
         bot.sendMessage(chatId, 
-            `💼 **Твой кошелек SMaster**\n\n` +
+            `💼 Твой кошелек SMaster\n\n` +
             `💵 USDT: ${wallet.balance_usdt.toFixed(2)} $\n` +
             `💎 TON: ${wallet.balance_ton.toFixed(2)} TON\n\n` +
-            `🆔 Твой ID: \`${wallet.user_id}\``,
-            { parse_mode: 'Markdown', ...mainMenu }
+            `🆔 Твой ID: ${wallet.user_id}`,
+            mainMenu
         );
     }
 });
@@ -93,9 +93,9 @@ bot.on('message', async (msg) => {
         bot.emit('text', { ...msg, text: '/wallet' });
     }
     if (text === '📊 Курсы') {
-        bot.sendMessage(chatId, `📊 **Курсы**\n\n1 USDT = 1$\n1 TON = 5.2$`, { parse_mode: 'Markdown', ...mainMenu });
+        bot.sendMessage(chatId, `📊 Курсы\n\n1 USDT = 1$\n1 TON = 5.2$`, mainMenu);
     }
     if (text === 'ℹ️ О боте') {
-        bot.sendMessage(chatId, `🦫 **SMaster** by Solo_Men Studios\nВерсия 1.0 Beta`, { parse_mode: 'Markdown', ...mainMenu });
+        bot.sendMessage(chatId, `🦫 SMaster by Solo_Men Studios\nВерсия 1.0 Beta`, mainMenu);
     }
 });
