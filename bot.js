@@ -50,7 +50,7 @@ function isAdmin(id) {
 }
 
 async function initDatabase() {
-    await pool.query(`
+    await pool.query(``);
         CREATE TABLE IF NOT EXISTS smaster_wallets (
             user_id BIGINT PRIMARY KEY,
             username TEXT,
