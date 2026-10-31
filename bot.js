@@ -12,7 +12,7 @@ http.createServer((req, res) => {
 
 // --- НАСТРОЙКИ ---
 const TOKEN = process.env.SMASTER_BOT_TOKEN;
-const SUPABASE_URL = 'https://dnrbvyuoiiphvkezwxbc.supabase.co';
+const SUPABASE_URL = 'https://dnrbvyuoiphvkezwxbc.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const CRYPTOBOT_TOKEN = process.env.CRYPTOBOT_TOKEN;
 
@@ -30,7 +30,7 @@ bot.setMyCommands([
     { command: 'help', description: '❓ Помощь' }
 ]);
 
-// --- МЕНЮ (Кнопка изменена на "Баланс") ---
+// --- МЕНЮ ---
 const mainMenu = {
     reply_markup: {
         keyboard: [
@@ -58,22 +58,33 @@ async function ensureWallet(chatId, username) {
 
 // --- ПОКАЗ БАЛАНСА (С индикатором загрузки) ---
 async function showWallet(chatId, userId, username) {
-    // Отправляем сообщение "Загружаю..."
     const msg = await bot.sendMessage(chatId, '⏳ Загружаю баланс...');
     
-    const wallet = await ensureWallet(userId, username);
-    
-    if (wallet) {
-        // Меняем сообщение на готовый баланс
-        bot.editMessageText(
+    try {
+        let { data: wallet, error } = await sb.from('smaster_wallets').select('*').eq('user_id', userId).maybeSingle();
+        
+        if (error) throw new Error('Ошибка БД (select): ' + error.message);
+
+        if (!wallet) {
+            const { data: newWallet, error: insertError } = await sb.from('smaster_wallets').insert({
+                user_id: userId, username: username || 'user', balance_usdt: 0, balance_ton: 0
+            }).select().single();
+            
+            if (insertError) throw new Error('Ошибка БД (insert): ' + insertError.message);
+            wallet = newWallet;
+        }
+
+        await bot.editMessageText(
             `💰 Твой Баланс SMaster\n\n` +
-            `💵 USDT: ${Number(wallet.balance_usdt).toFixed(2)} $\n` +
-            `💎 TON: ${Number(wallet.balance_ton).toFixed(2)} TON\n\n` +
+            `💵 USDT: ${Number(wallet.balance_usdt || 0).toFixed(2)} $\n` +
+            `💎 TON: ${Number(wallet.balance_ton || 0).toFixed(2)} TON\n\n` +
             `🆔 Твой ID: ${wallet.user_id}`, 
             { chat_id: chatId, message_id: msg.message_id, ...mainMenu }
         );
-    } else {
-        bot.editMessageText('❌ Ошибка загрузки.', { chat_id: chatId, message_id: msg.message_id, ...mainMenu });
+
+    } catch (e) {
+        console.error(e);
+        bot.editMessageText(`❌ Ошибка: ${e.message}`, { chat_id: chatId, message_id: msg.message_id, ...mainMenu }).catch(() => {});
     }
 }
 
@@ -95,13 +106,11 @@ bot.on('message', async (msg) => {
     const userId = msg.from.id;
     const text = msg.text;
 
-    // Если пользователь нажимает на кнопку меню, сбрасываем ожидание ввода
     const menuButtons = ['💰 Баланс', '💳 Пополнить', '📤 Перевести', '🚀 Ракета', '🎁 Рефералка', '📊 Курсы'];
     if (menuButtons.includes(text)) {
         delete sessions[userId];
     }
 
-    // Обработка кнопок меню
     if (text === '💰 Баланс') return await showWallet(chatId, userId, msg.from.username);
     if (text === '📊 Курсы') return bot.sendMessage(chatId, `📊 Курсы\n\n1 USDT = 1$\n1 TON = 5.2$`, mainMenu);
     if (text === '🎁 Рефералка') return bot.sendMessage(chatId, `🎁 Твоя ссылка:\nt.me/SMasterWallet_bot?start=ref_${userId}`, mainMenu);
@@ -121,7 +130,6 @@ bot.on('message', async (msg) => {
         return bot.sendMessage(chatId, '🚀 Введи сумму ставки в USDT:');
     }
 
-    // --- ЛОГИКА ОЖИДАНИЯ ВВОДА ---
     const session = sessions[userId];
     if (!session) return; 
 
