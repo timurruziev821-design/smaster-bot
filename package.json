@@ -1,7 +1,7 @@
 {
   "name": "smaster-bot",
   "version": "1.0.0",
-  "description": "SMaster Crypto Wallet Telegram Bot",
+  "description": "SMaster Crypto Wallet",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
