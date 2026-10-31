@@ -1,430 +1,470 @@
-// SMaster Telegram Bot — Node.js
-// Требуются переменные окружения:
-// SMaster_BOT_TOKEN (или SMASTER_BOT_TOKEN), SUPABASE_URL, SUPABASE_KEY,
-// CRYPTOBOT_TOKEN, PUBLIC_URL (например https://your-app.onrender.com)
-
+const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
-const http = require('http');
-const https = require('https');
-const crypto = require('crypto');
 
-const TOKEN = process.env.SMASTER_BOT_TOKEN;
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://dnrbvyuoiiphvkezwxbc.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_KEY; // На сервере используйте service_role key, не публикуйте его.
+// Переменные окружения (в Render)
+const BOT_TOKEN = process.env.SMASTER_BOT_TOKEN || process.env.BOT_TOKEN;
 const CRYPTOBOT_TOKEN = process.env.CRYPTOBOT_TOKEN;
-const PORT = Number(process.env.PORT || 3000);
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-if (!TOKEN || !SUPABASE_URL || !SUPABASE_KEY || !CRYPTOBOT_TOKEN) {
-    throw new Error('Не заданы SMASTER_BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY или CRYPTOBOT_TOKEN');
+if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
+  console.error('❌ ОШИБКА: Не заданы токены в переменных окружения Render!');
+  process.exit(1);
 }
 
-const bot = new TelegramBot(TOKEN, { polling: true });
-const db = createClient(SUPABASE_URL, SUPABASE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false }
-});
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const sessions = new Map();
+// КОМИССИЯ
+const TRANSFER_FEE = 0.1; 
 
-const mainMenu = {
-    reply_markup: {
-        keyboard: [
-            [{ text: '💰 Баланс' }, { text: '💳 Пополнить' }],
-            [{ text: '📤 Перевести' }, { text: '🚀 Ракета' }],
-            [{ text: '🎁 Рефералка' }, { text: '📊 Курсы' }]
-        ],
-        resize_keyboard: true
-    }
+// ============ ГЛАВНОЕ МЕНЮ ============
+const MAIN_MENU = {
+  reply_markup: {
+    keyboard: [
+      [{ text: '💰 Баланс' }, { text: '💳 Пополнить' }],
+      [{ text: '📤 Перевести' }, { text: '🚀 Ракета' }],
+      [{ text: '🔄 P2P Маркет' }, { text: '🎁 Рефералка' }],
+      [{ text: '📈 Курсы' }]
+    ],
+    resize_keyboard: true
+  }
 };
 
-function parseAmount(value) {
-    const raw = String(value || '').trim().replace(',', '.');
-    if (!/^(?:\d+)(?:\.\d{1,6})?$/.test(raw)) return null;
-    const amount = Number(raw);
-    if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) return null;
-    return amount;
-}
-
-async function getWallet(userId, username) {
-    const { data, error } = await db
-        .from('smaster_wallets')
-        .upsert({
-            user_id: userId,
-            username: username || null
-        }, { onConflict: 'user_id', ignoreDuplicates: true })
-        .select('*')
-        .maybeSingle();
-
-    if (error) throw error;
-
-    // При ignoreDuplicates Supabase может вернуть null — тогда читаем существующую запись.
-    if (data) return data;
-
-    const result = await db
-        .from('smaster_wallets')
-        .select('*')
-        .eq('user_id', userId)
-        .single();
-
-    if (result.error) throw result.error;
-    return result.data;
-}
-
-async function showWallet(chatId, userId, username) {
-    try {
-        const wallet = await getWallet(userId, username);
-        return bot.sendMessage(
-            chatId,
-            `💰 Твой баланс SMaster\n\n` +
-            `💵 USDT: ${Number(wallet.balance_usdt || 0).toFixed(2)} $\n` +
-            `💎 TON: ${Number(wallet.balance_ton || 0).toFixed(2)} TON\n\n` +
-            `🆔 ID: ${wallet.user_id}`,
-            mainMenu
-        );
-    } catch (error) {
-        console.error('showWallet:', error);
-        return bot.sendMessage(chatId, '❌ Не удалось загрузить баланс. Попробуй позже.', mainMenu);
-    }
-}
-
-function cryptoRequest(path, payload) {
-    return new Promise((resolve, reject) => {
-        const body = JSON.stringify(payload);
-        const req = https.request({
-            hostname: 'pay.crypt.bot',
-            path,
-            method: 'POST',
-            headers: {
-                'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN,
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(body)
-            },
-            timeout: 15000
-        }, (res) => {
-            let raw = '';
-            res.setEncoding('utf8');
-            res.on('data', chunk => raw += chunk);
-            res.on('end', () => {
-                let parsed;
-                try {
-                    parsed = JSON.parse(raw);
-                } catch {
-                    return reject(new Error('CryptoBot вернул некорректный ответ'));
-                }
-                if (res.statusCode < 200 || res.statusCode >= 300 || !parsed.ok) {
-                    return reject(new Error(parsed.error?.name || 'Ошибка CryptoBot API'));
-                }
-                resolve(parsed.result);
-            });
-        });
-
-        req.on('timeout', () => req.destroy(new Error('Тайм-аут CryptoBot')));
-        req.on('error', reject);
-        req.write(body);
-        req.end();
-    });
-}
-
-async function createDepositInvoice(userId, amount) {
-    const invoice = await cryptoRequest('/api/createInvoice', {
-        asset: 'USDT',
-        amount: String(amount),
-        description: `SMaster deposit for ${userId}`,
-        payload: String(userId)
-    });
-
-    if (!invoice?.invoice_id || !invoice?.bot_invoice_url) {
-        throw new Error('CryptoBot не вернул данные счёта');
-    }
-
-    const { error } = await db.from('smaster_deposits').insert({
-        invoice_id: String(invoice.invoice_id),
-        user_id: userId,
-        amount: amount,
-        asset: 'USDT',
-        status: 'pending'
-    });
-
-    if (error) throw error;
-    return invoice;
-}
-
-function verifyCryptoSignature(rawBody, signature) {
-    if (!signature || !CRYPTOBOT_TOKEN) return false;
-
-    const secret = crypto.createHash('sha256').update(CRYPTOBOT_TOKEN).digest();
-    const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-
-    try {
-        const a = Buffer.from(expected, 'hex');
-        const b = Buffer.from(signature, 'hex');
-        return a.length === b.length && crypto.timingSafeEqual(a, b);
-    } catch {
-        return false;
-    }
-}
-
-async function handleCryptoWebhook(rawBody, signature) {
-    if (!verifyCryptoSignature(rawBody, signature)) {
-        throw new Error('Неверная подпись CryptoBot');
-    }
-
-    const update = JSON.parse(rawBody.toString('utf8'));
-    const invoice = update?.payload;
-
-    if (update?.update_type !== 'invoice_paid' || !invoice) {
-        return { ignored: true };
-    }
-
-    if (invoice.status !== 'paid' || invoice.asset !== 'USDT') {
-        throw new Error('Статус или валюта счёта не подходят');
-    }
-
-    const invoiceId = String(invoice.invoice_id || '');
-    const amount = parseAmount(invoice.amount);
-
-    if (!invoiceId || amount === null) {
-        throw new Error('Некорректные данные счёта');
-    }
-
-    const { data, error } = await db.rpc('credit_smaster_deposit', {
-        p_invoice_id: invoiceId,
-        p_amount: amount,
-        p_asset: 'USDT'
-    });
-
-    if (error) throw error;
+// ============ ХЕЛПЕРЫ ============
+async function getWallet(userId) {
+  try {
+    const { data, error } = await supabase.from('smaster_wallets').select('*').eq('user_id', userId).maybeSingle();
+    if (error) { console.log('getWallet err:', error.message); return null; }
     return data;
+  } catch (e) { return null; }
 }
 
-bot.setMyCommands([
-    { command: 'start', description: '🏛 Главное меню' },
-    { command: 'wallet', description: '💰 Баланс' },
-    { command: 'deposit', description: '💳 Пополнить' },
-    { command: 'send', description: '📤 Перевести' },
-    { command: 'play', description: '🚀 Ракета (демо)' },
-    { command: 'help', description: '❓ Помощь' }
-]).catch(console.error);
-
-bot.onText(/^\/start(?:\s+(.+))?$/, async (msg, match) => {
-    sessions.delete(msg.from.id);
-    try {
-        await getWallet(msg.from.id, msg.from.username);
-        const ref = match?.[1];
-        bot.sendMessage(
-            msg.chat.id,
-            `👋 Привет, ${msg.from.first_name || 'друг'}!\nДобро пожаловать в SMaster.`,
-            mainMenu
-        );
-
-        // Реферальный параметр пока только распознаётся.
-        // Начисление бонусов следует добавлять отдельной защищённой SQL-транзакцией.
-        if (ref?.startsWith('ref_')) {
-            console.log(`Referral start: user=${msg.from.id}, ref=${ref.slice(4)}`);
-        }
-    } catch (error) {
-        console.error('/start:', error);
-        bot.sendMessage(msg.chat.id, '❌ Не удалось создать кошелёк. Попробуй позже.');
+async function ensureWallet(msg) {
+  try {
+    let w = await getWallet(msg.from.id);
+    if (!w) {
+      const { data } = await supabase.from('smaster_wallets').insert({
+        user_id: msg.from.id,
+        username: msg.from.username || null,
+        balance_usdt: 0,
+        balance_ton: 0
+      }).select().single();
+      return data;
+    } else if (msg.from.username && w.username !== msg.from.username) {
+      await supabase.from('smaster_wallets').update({ username: msg.from.username }).eq('user_id', msg.from.id);
     }
-});
+    return w;
+  } catch (e) { console.log('ensureWallet err:', e.message); return null; }
+}
 
-bot.onText(/^\/wallet$/, msg => {
-    sessions.delete(msg.from.id);
-    showWallet(msg.chat.id, msg.from.id, msg.from.username);
-});
+async function updateWallet(userId, patch) {
+  try {
+    const { error } = await supabase.from('smaster_wallets').update(patch).eq('user_id', userId);
+    if (error) console.log('updateWallet err:', error.message);
+  } catch (e) { console.log('updateWallet catch:', e.message); }
+}
 
-bot.onText(/^\/deposit$/, msg => {
-    sessions.set(msg.from.id, { action: 'deposit' });
-    bot.sendMessage(msg.chat.id, '💳 Введи сумму пополнения в USDT:');
-});
+function fmt(n, d = 2) { return Number(n || 0).toFixed(d); }
 
-bot.onText(/^\/send$/, msg => {
-    sessions.set(msg.from.id, { action: 'send_user' });
-    bot.sendMessage(msg.chat.id, '📤 Введи username получателя без @:');
-});
+// ============ СОСТОЯНИЯ ============
+const states = new Map();
 
-bot.onText(/^\/play$/, msg => {
-    sessions.set(msg.from.id, { action: 'rocket_demo' });
-    bot.sendMessage(msg.chat.id, '🚀 Демо-режим ракеты: введи виртуальную ставку (баланс не меняется):');
-});
-
-bot.onText(/^\/help$/, msg => {
-    bot.sendMessage(
-        msg.chat.id,
-        'Команды:\n/start — меню\n/wallet — баланс\n/deposit — пополнение\n/send — перевод\n/play — демо-ракета',
-        mainMenu
+// ============ СТАРТ ============
+bot.onText(/^\/start/, async (msg) => {
+  try {
+    await ensureWallet(msg);
+    await bot.sendMessage(msg.chat.id,
+      `Привет, ${msg.from.first_name || 'друг'}! 👋\n\nДобро пожаловать в SMaster — твой крипто-кошелёк.\nВыбирай действие в меню ниже 👇`,
+      MAIN_MENU
     );
+  } catch (e) { console.log('start err:', e.message); }
 });
 
+// ============ ОБРАБОТЧИК ТЕКСТА ============
 bot.on('message', async (msg) => {
+  try {
     if (!msg.text || msg.text.startsWith('/')) return;
-
+    const text = msg.text;
     const chatId = msg.chat.id;
     const userId = msg.from.id;
-    const text = msg.text.trim();
 
-    if (text === '💰 Баланс') {
-        sessions.delete(userId);
-        return showWallet(chatId, userId, msg.from.username);
+    // Машина состояний (ожидание ввода)
+    const state = states.get(userId);
+    if (state) {
+      if (text === '⬅️ Назад' || text.toLowerCase() === 'отмена' || text === '/cancel') {
+        states.delete(userId);
+        return bot.sendMessage(chatId, 'Действие отменено. Главное меню.', MAIN_MENU);
+      }
+      if (state.type === 'p2p_create') return handleCreateInput(msg, state);
+      if (state.type === 'deposit') return handleDepositInput(msg);
+      if (state.type === 'transfer') return handleTransferInput(msg, state);
+      return;
     }
 
+    // Кнопки
+    if (text === '💰 Баланс') return handleBalance(msg);
     if (text === '💳 Пополнить') {
-        sessions.set(userId, { action: 'deposit' });
-        return bot.sendMessage(chatId, '💳 Введи сумму пополнения в USDT:');
+      states.set(userId, { type: 'deposit' });
+      return bot.sendMessage(chatId, '💳 Сколько USDT хочешь пополнить? Напиши число (например 5).\n\nИли напиши «отмена».');
     }
-
     if (text === '📤 Перевести') {
-        sessions.set(userId, { action: 'send_user' });
-        return bot.sendMessage(chatId, '📤 Введи username получателя без @:');
+      states.set(userId, { type: 'transfer', step: 'recipient' });
+      return bot.sendMessage(chatId, '📤 Кому перевести? Напиши ID пользователя или @username.\n\nКомиссия сервиса: 0.1 USDT.\n\nИли напиши «отмена».');
     }
+    if (text === '🚀 Ракета') return handleRocket(msg);
+    if (text === '🔄 P2P Маркет') return handleP2PMenu(msg);
+    if (text === '🎁 Рефералка') return handleReferral(msg);
+    if (text === '📈 Курсы') return handleRates(msg);
 
-    if (text === '🚀 Ракета') {
-        sessions.set(userId, { action: 'rocket_demo' });
-        return bot.sendMessage(chatId, '🚀 Демо-режим: введи виртуальную ставку:');
-    }
-
-    if (text === '🎁 Рефералка') {
-        sessions.delete(userId);
-        return bot.sendMessage(
-            chatId,
-            `🎁 Твоя ссылка:\nhttps://t.me/${(await bot.getMe()).username}?start=ref_${userId}`,
-            mainMenu
-        );
-    }
-
-    if (text === '📊 Курсы') {
-        sessions.delete(userId);
-        return bot.sendMessage(chatId, '📊 Информационные курсы:\n1 USDT = 1 USD\nКурс TON уточняй перед обменом.', mainMenu);
-    }
-
-    const session = sessions.get(userId);
-    if (!session) return;
-
-    if (session.action === 'deposit') {
-        const amount = parseAmount(text);
-        if (amount === null) return bot.sendMessage(chatId, '❌ Введи корректную сумму, например 10 или 10.50.');
-
-        sessions.delete(userId);
-        try {
-            const invoice = await createDepositInvoice(userId, amount);
-            return bot.sendMessage(chatId, `💳 Счёт на ${amount.toFixed(2)} USDT создан.\nЗачисление произойдёт после подтверждения оплаты.`, {
-                reply_markup: {
-                    inline_keyboard: [[{ text: 'Оплатить', url: invoice.bot_invoice_url }]]
-                }
-            });
-        } catch (error) {
-            console.error('create invoice:', error);
-            return bot.sendMessage(chatId, '❌ Не удалось создать счёт. Попробуй позже.', mainMenu);
-        }
-    }
-
-    if (session.action === 'send_user') {
-        const username = text.replace(/^@/, '').toLowerCase();
-        if (!/^[a-z0-9_]{5,32}$/.test(username)) {
-            return bot.sendMessage(chatId, '❌ Введи корректный Telegram username без @.');
-        }
-        session.targetUsername = username;
-        session.action = 'send_amount';
-        return bot.sendMessage(chatId, '💰 Введи сумму перевода в USDT:');
-    }
-
-    if (session.action === 'send_amount') {
-        const amount = parseAmount(text);
-        if (amount === null) return bot.sendMessage(chatId, '❌ Введи корректную сумму.');
-
-        try {
-            const { data: receiver, error: receiverError } = await db
-                .from('smaster_wallets')
-                .select('user_id, username')
-                .ilike('username', session.targetUsername)
-                .maybeSingle();
-
-            if (receiverError) throw receiverError;
-            if (!receiver) return bot.sendMessage(chatId, '❌ Получатель не найден. Он должен хотя бы раз запустить бота.');
-
-            const { data, error } = await db.rpc('transfer_smaster_usdt', {
-                p_sender: userId,
-                p_receiver: receiver.user_id,
-                p_amount: amount
-            });
-
-            if (error) throw error;
-            sessions.delete(userId);
-
-            bot.sendMessage(
-                chatId,
-                `✅ Перевод выполнен!\nОтправлено: ${amount.toFixed(2)} USDT\nКомиссия: ${Number(data.fee).toFixed(2)} USDT`,
-                mainMenu
-            );
-
-            bot.sendMessage(receiver.user_id, `💰 Тебе поступил перевод ${Number(data.received).toFixed(2)} USDT.`).catch(() => {});
-        } catch (error) {
-            console.error('transfer:', error);
-            return bot.sendMessage(chatId, `❌ Перевод не выполнен: ${error.message || 'ошибка'}`, mainMenu);
-        }
-        return;
-    }
-
-    if (session.action === 'rocket_demo') {
-        const amount = parseAmount(text);
-        if (amount === null) return bot.sendMessage(chatId, '❌ Введи корректное число.');
-        sessions.delete(userId);
-
-        // Это только демонстрация. Реальные средства не списываются и не начисляются.
-        const multiplier = 1 + Math.random() * 4;
-        return bot.sendMessage(
-            chatId,
-            `🚀 Демо-раунд завершён!\nУсловный коэффициент: x${multiplier.toFixed(2)}\nВиртуальная ставка: ${amount.toFixed(2)}\n💡 Реальный баланс не изменён.`,
-            mainMenu
-        );
-    }
+  } catch (e) { console.log('msg err:', e.message); }
 });
 
-bot.on('polling_error', error => console.error('Telegram polling error:', error.message));
-bot.on('error', error => console.error('Telegram bot error:', error.message));
+// ============ БАЛАНС ============
+async function handleBalance(msg) {
+  const chatId = msg.chat.id;
+  try {
+    const temp = await bot.sendMessage(chatId, '⏳ Загружаю...');
+    const w = await getWallet(msg.from.id);
+    await bot.deleteMessage(chatId, temp.message_id).catch(() => {});
+    
+    if (!w) return bot.sendMessage(chatId, 'Кошелёк не найден. Напиши /start', MAIN_MENU);
+    await bot.sendMessage(chatId,
+      `💰 Твой баланс:\n\n• USDT: ${fmt(w.balance_usdt)}\n• TON: ${fmt(w.balance_ton)}`,
+      MAIN_MENU
+    );
+  } catch (e) {
+    await bot.sendMessage(chatId, 'Ошибка при загрузке баланса.', MAIN_MENU);
+  }
+}
 
-// Один HTTP-сервер обслуживает Render health-check и CryptoBot webhook.
-const server = http.createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/') {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        return res.end('SMaster Bot is running');
+// ============ ПОПОЛНЕНИЕ ============
+async function handleDepositInput(msg) {
+  const chatId = msg.chat.id;
+  const amount = Number(msg.text.replace(',', '.'));
+  if (!amount || amount <= 0) return bot.sendMessage(chatId, '❌ Введи корректное число больше 0. Или «отмена».');
+  
+  states.delete(msg.from.id);
+  if (!CRYPTOBOT_TOKEN) return bot.sendMessage(chatId, 'Пополнение временно недоступно.', MAIN_MENU);
+
+  try {
+    const res = await fetch('https://pay.crypt.bot/api/createInvoice', {
+      method: 'POST',
+      headers: { 'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        asset: 'USDT', amount: String(amount), description: `Пополнение SMaster #${msg.from.id}`,
+        payload: String(msg.from.id), allow_comments: false, allow_anonymous: false, expires_in: 3600
+      })
+    });
+    const data = await res.json();
+    if (!data.ok) return bot.sendMessage(chatId, 'Не смог создать счёт. Попробуй позже.', MAIN_MENU);
+    
+    await bot.sendMessage(chatId,
+      `💳 Счёт на ${data.result.amount} ${data.result.asset} создан.\n\nОплати по ссылке:\n${data.result.bot_invoice_url}\n\nПосле оплаты баланс зачислится автоматически.`,
+      MAIN_MENU
+    );
+  } catch (e) {
+    await bot.sendMessage(chatId, 'Ошибка при создании счёта.', MAIN_MENU);
+  }
+}
+
+// ============ ПЕРЕВОД (С КОМИССИЕЙ 0.1) ============
+async function handleTransferInput(msg, state) {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
+  if (state.step === 'recipient') {
+    const t = msg.text.trim();
+    let recipient = null;
+    if (t.startsWith('@')) {
+      const { data } = await supabase.from('smaster_wallets').select('*').ilike('username', t.slice(1)).maybeSingle();
+      recipient = data;
+    } else {
+      const rid = Number(t);
+      if (rid) recipient = await getWallet(rid);
+    }
+    if (!recipient) return bot.sendMessage(chatId, '❌ Пользователь не найден. Введи ID или @username. Или «отмена».');
+    if (recipient.user_id === userId) return bot.sendMessage(chatId, '❌ Нельзя перевести самому себе.');
+    
+    states.set(userId, { type: 'transfer', step: 'amount', to: recipient.user_id, toName: recipient.username || recipient.user_id });
+    return bot.sendMessage(chatId, `Кому: ${recipient.username ? '@' + recipient.username : recipient.user_id}\n\nСколько USDT перевести? (Комиссия: 0.1 USDT)`);
+  }
+
+  if (state.step === 'amount') {
+    const amount = Number(msg.text.replace(',', '.'));
+    if (!amount || amount <= 0) return bot.sendMessage(chatId, '❌ Введи корректное число. Или «отмена».');
+    
+    const totalDeduct = amount + TRANSFER_FEE;
+    const w = await getWallet(userId);
+    
+    if (!w || Number(w.balance_usdt) < totalDeduct) {
+      states.delete(userId);
+      return bot.sendMessage(chatId, `❌ Недостаточно USDT!\nНужно: ${fmt(totalDeduct)} USDT (включая комиссию 0.1)`, MAIN_MENU);
+    }
+    
+    const to = await getWallet(state.to);
+    if (!to) {
+      states.delete(userId);
+      return bot.sendMessage(chatId, '❌ Получатель больше не существует.', MAIN_MENU);
+    }
+    
+    // Списываем с отправителя (сумма + комиссия), начисляем получателю (сумма)
+    await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) - totalDeduct).toFixed(8) });
+    await updateWallet(state.to, { balance_usdt: (Number(to.balance_usdt) + amount).toFixed(8) });
+    states.delete(userId);
+    
+    await bot.sendMessage(chatId, `✅ Успешно!\nТы перевел: ${fmt(amount)} USDT\nКомиссия: ${fmt(TRANSFER_FEE)} USDT\nПолучатель: ${state.toName}`, MAIN_MENU);
+    bot.sendMessage(state.to, `💸 Тебе пришло ${fmt(amount)} USDT от пользователя ${userId}`).catch(() => {});
+  }
+}
+
+// ============ РАКЕТА (ШАНС 1 НА МИЛЛИОН) ============
+async function handleRocket(msg) {
+  const chatId = msg.chat.id;
+  const win = Math.random() < 0.000001; // 1 на миллион
+  if (win) {
+    const w = await getWallet(msg.from.id);
+    await updateWallet(msg.from.id, { balance_usdt: (Number(w?.balance_usdt || 0) + 100).toFixed(8) });
+    await bot.sendMessage(chatId, '🚀🚀🚀 РАКЕТА ВЗЛЕТЕЛА!!!\n\n🎉 Ты выиграл 100 USDT!\n\n(шанс 1 на миллион)', MAIN_MENU);
+  } else {
+    await bot.sendMessage(chatId, '🚀 Ты запустил ракету...\n\n💥 Она взорвалась.\n\nПовезет в следующий раз!', MAIN_MENU);
+  }
+}
+
+// ============ РЕФЕРАЛКА ============
+async function handleReferral(msg) {
+  try {
+    const me = await bot.getMe();
+    const link = `https://t.me/${me.username}?start=ref_${msg.from.id}`;
+    await bot.sendMessage(msg.chat.id, `🎁 Твоя реферальная ссылка:\n${link}\n\nПриглашай друзей!`, MAIN_MENU);
+  } catch (e) {
+    await bot.sendMessage(msg.chat.id, 'Не смог получить ссылку. Попробуй позже.', MAIN_MENU);
+  }
+}
+
+// ============ КУРСЫ С CRYPTOBOT ============
+async function handleRates(msg) {
+  const chatId = msg.chat.id;
+  try {
+    const temp = await bot.sendMessage(chatId, '⏳ Загружаю курсы с CryptoBot...');
+    // Запрос к CryptoBot API для получения курсов
+    const res = await fetch('https://pay.crypt.bot/api/getExchangeRates', {
+      method: 'GET',
+      headers: { 'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN }
+    });
+    const data = await res.json();
+    
+    await bot.deleteMessage(chatId, temp.message_id).catch(() => {});
+    
+    if (!data.ok) return bot.sendMessage(chatId, 'Не смог загрузить курсы. Попробуй позже.', MAIN_MENU);
+    
+    // Находим нужные пары
+    const usdtTon = data.result.find(r => r.source === 'USDT' && r.target === 'TON');
+    const tonUsdt = data.result.find(r => r.source === 'TON' && r.target === 'USDT');
+    const usdtRub = data.result.find(r => r.source === 'USDT' && r.target === 'RUB');
+    
+    let text = '📈 Актуальные курсы (CryptoBot):\n\n';
+    if (usdtTon) text += `• 1 USDT = ${fmt(usdtTon.rate, 4)} TON\n`;
+    if (tonUsdt) text += `• 1 TON = ${fmt(tonUsdt.rate, 2)} USDT\n`;
+    if (usdtRub) text += `• 1 USDT = ${fmt(usdtRub.rate, 2)} RUB\n`;
+    
+    await bot.sendMessage(chatId, text, MAIN_MENU);
+  } catch (e) {
+    console.log('rates err:', e.message);
+    await bot.sendMessage(chatId, 'Ошибка при загрузке курсов.', MAIN_MENU);
+  }
+}
+
+// ============ P2P МЕНЮ ============
+async function handleP2PMenu(msg) {
+  await bot.sendMessage(msg.chat.id, '🔄 P2P Маркет SMaster\n\nВыбирай действие:', {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '🛒 Купить USDT', callback_data: 'p2p_buy' }],
+        [{ text: '➕ Выставить объявление', callback_data: 'p2p_create' }],
+        [{ text: '📢 Мои объявления', callback_data: 'p2p_my' }]
+      ]
+    }
+  });
+}
+
+// ============ СОЗДАНИЕ ОБЪЯВЛЕНИЯ ============
+async function handleCreateInput(msg, state) {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const text = msg.text.trim();
+
+  if (state.step === 'amount') {
+    const amount = Number(text.replace(',', '.'));
+    if (!amount || amount <= 0) return bot.sendMessage(chatId, '❌ Введи число USDT. Или «отмена».');
+    states.set(userId, { ...state, step: 'currency', amount });
+    return bot.sendMessage(chatId, 'Валюта оплаты: напиши TON или RUB');
+  }
+
+  if (state.step === 'currency') {
+    const cur = text.toUpperCase();
+    if (cur !== 'TON' && cur !== 'RUB') return bot.sendMessage(chatId, '❌ Напиши TON или RUB');
+    states.set(userId, { ...state, step: 'price', currency: cur });
+    return bot.sendMessage(chatId, `Цена за 1 USDT в ${cur}? Напиши число.`);
+  }
+
+  if (state.step === 'price') {
+    const price = Number(text.replace(',', '.'));
+    if (!price || price <= 0) return bot.sendMessage(chatId, '❌ Введи корректную цену. Или «отмена».');
+    
+    const w = await getWallet(userId);
+    if (!w || Number(w.balance_usdt) < state.amount) {
+      states.delete(userId);
+      return bot.sendMessage(chatId, '❌ У тебя недостаточно USDT для такого объявления.', MAIN_MENU);
+    }
+    
+    const { data, error } = await supabase.from('smaster_p2p_ads').insert({
+      seller_id: userId, seller_username: msg.from.username || null,
+      amount: state.amount, price: price, currency: state.currency
+    }).select().single();
+    
+    states.delete(userId);
+    if (error || !data) return bot.sendMessage(chatId, '❌ Не смог создать объявление.', MAIN_MENU);
+    
+    await bot.sendMessage(chatId, `✅ Объявление #${data.id} создано!\n\nПродаёшь: ${state.amount} USDT\nЦена: ${price} ${state.currency} за 1 USDT\nИтого: ${fmt(state.amount * price)} ${state.currency}`, MAIN_MENU);
+  }
+}
+
+// ============ CALLBACK'И (INLINE КНОПКИ) ============
+bot.on('callback_query', async (query) => {
+  try {
+    const data = query.data;
+    const chatId = query.message.chat.id;
+    const userId = query.from.id;
+    await bot.answerCallbackQuery(query.id).catch(() => {}); // Сразу гасим загрузку кнопки
+
+    // Создание объявления
+    if (data === 'p2p_create') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      states.set(userId, { type: 'p2p_create', step: 'amount' });
+      return bot.sendMessage(chatId, '➕ Сколько USDT продаёшь? Напиши число.\n\nИли «отмена».');
     }
 
-    if (req.method === 'POST' && req.url === '/cryptobot-webhook') {
-        let body = Buffer.alloc(0);
+    // Список на покупку
+    if (data === 'p2p_buy') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const { data: ads } = await supabase.from('smaster_p2p_ads').select('*').eq('status', 'active').neq('seller_id', userId).order('created_at', { ascending: false }).limit(10);
+      
+      if (!ads || ads.length === 0) return bot.sendMessage(chatId, '🛒 Пока нет активных объявлений.', MAIN_MENU);
+      
+      const buttons = ads.map(ad => [{ text: `#${ad.id} · ${ad.amount} USDT · ${ad.price} ${ad.currency}`, callback_data: `p2p_view_${ad.id}` }]);
+      return bot.sendMessage(chatId, '🛒 Активные объявления:', { reply_markup: { inline_keyboard: buttons } });
+    }
 
-        req.on('data', chunk => {
-            body = Buffer.concat([body, chunk]);
-            if (body.length > 1024 * 1024) {
-                res.writeHead(413);
-                res.end('Payload too large');
-                req.destroy();
-            }
+    // Просмотр объявления
+    if (data.startsWith('p2p_view_')) {
+      const id = Number(data.split('_')[2]);
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const { data: ad } = await supabase.from('smaster_p2p_ads').select('*').eq('id', id).maybeSingle();
+      
+      if (!ad || ad.status !== 'active') return bot.sendMessage(chatId, '❌ Объявление недоступно.', MAIN_MENU);
+      
+      const total = Number(ad.amount) * Number(ad.price);
+      let extra = ad.currency === 'RUB' ? '\n\n⚠️ Оплата рублями — свяжись с продавцом напрямую.' : '';
+      
+      return bot.sendMessage(chatId,
+        `📢 Объявление #${ad.id}\n\nПродавец: @${ad.seller_username || 'id'+ad.seller_id}\nUSDT: ${ad.amount}\nЦена: ${ad.price} ${ad.currency}\nИтого: ${fmt(total)} ${ad.currency}${extra}`,
+        { reply_markup: { inline_keyboard: [[{ text: '✅ Купить', callback_data: `p2p_buy_${ad.id}` }], [{ text: '↩️ Назад', callback_data: 'p2p_buy' }]] } }
+      );
+    }
+
+    // Сама покупка
+    if (data.startsWith('p2p_buy_')) {
+      const id = Number(data.split('_')[2]);
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const { data: ad } = await supabase.from('smaster_p2p_ads').select('*').eq('id', id).maybeSingle();
+      
+      if (!ad || ad.status !== 'active') return bot.sendMessage(chatId, '❌ Объявление недоступно.', MAIN_MENU);
+      if (ad.seller_id === userId) return bot.sendMessage(chatId, '❌ Нельзя купить своё.', MAIN_MENU);
+
+      const amount = Number(ad.amount);
+      const price = Number(ad.price);
+      const total = amount * price;
+
+      if (ad.currency === 'RUB') {
+        return bot.sendMessage(chatId, `💬 Свяжись с @${ad.seller_username || 'id'+ad.seller_id}\n\nПереведи ${fmt(total)} RUB и напиши ему.`, MAIN_MENU);
+      }
+
+      // Сделка TON
+      const buyer = await getWallet(userId);
+      const seller = await getWallet(ad.seller_id);
+      
+      if (!buyer) return bot.sendMessage(chatId, '❌ Кошелёк не найден.', MAIN_MENU);
+      if (!seller) {
+        await supabase.from('smaster_p2p_ads').update({ status: 'cancelled' }).eq('id', ad.id);
+        return bot.sendMessage(chatId, '❌ Продавец пропал. Объявление отменено.', MAIN_MENU);
+      }
+      
+      if (Number(buyer.balance_ton) < total) return bot.sendMessage(chatId, `❌ Недостаточно TON. Нужно ${fmt(total)} TON.`, MAIN_MENU);
+      if (Number(seller.balance_usdt) < amount) {
+        await supabase.from('smaster_p2p_ads').update({ status: 'cancelled' }).eq('id', ad.id);
+        return bot.sendMessage(chatId, '❌ У продавца нет USDT. Объявление отменено.', MAIN_MENU);
+      }
+
+      // Переводим
+      await updateWallet(userId, { balance_ton: (Number(buyer.balance_ton) - total).toFixed(8), balance_usdt: (Number(buyer.balance_usdt) + amount).toFixed(8) });
+      await updateWallet(ad.seller_id, { balance_ton: (Number(seller.balance_ton) + total).toFixed(8), balance_usdt: (Number(seller.balance_usdt) - amount).toFixed(8) });
+      await supabase.from('smaster_p2p_ads').update({ status: 'completed', buyer_id: userId }).eq('id', ad.id);
+
+      await bot.sendMessage(chatId, `✅ Сделка #${ad.id} завершена!\n\n+${amount} USDT\n−${fmt(total)} TON`, MAIN_MENU);
+      bot.sendMessage(ad.seller_id, `✅ Твоё объявление #${ad.id} куплено!\n\n−${amount} USDT\n+${fmt(total)} TON`).catch(() => {});
+    }
+
+    // Мои объявления
+    if (data === 'p2p_my') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const { data: ads } = await supabase.from('smaster_p2p_ads').select('*').eq('seller_id', userId).eq('status', 'active');
+      if (!ads || ads.length === 0) return bot.sendMessage(chatId, '📢 У тебя нет активных объявлений.', MAIN_MENU);
+      
+      for (const ad of ads) {
+        await bot.sendMessage(chatId, `📢 #${ad.id}\nUSDT: ${ad.amount}\nЦена: ${ad.price} ${ad.currency}`, {
+          reply_markup: { inline_keyboard: [[{ text: '❌ Отменить', callback_data: `p2p_cancel_${ad.id}` }]] }
         });
-
-        req.on('end', async () => {
-            try {
-                const signature = req.headers['crypto-pay-api-signature'];
-                const result = await handleCryptoWebhook(body, signature);
-                console.log('CryptoBot webhook processed:', result);
-                res.writeHead(200, { 'Content-Type': 'text/plain' });
-                res.end('OK');
-            } catch (error) {
-                console.error('CryptoBot webhook error:', error.message);
-                res.writeHead(400, { 'Content-Type': 'text/plain' });
-                res.end('Invalid webhook');
-            }
-        });
-        return;
+      }
+      return bot.sendMessage(chatId, '⬆️ Твои объявления.', MAIN_MENU);
     }
 
-    res.writeHead(404);
-    res.end('Not found');
+    // Отмена
+    if (data.startsWith('p2p_cancel_')) {
+      const id = Number(data.split('_')[2]);
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      await supabase.from('smaster_p2p_ads').update({ status: 'cancelled' }).eq('id', id).eq('seller_id', userId);
+      return bot.sendMessage(chatId, `✅ Объявление #${id} отменено.`, MAIN_MENU);
+    }
+
+  } catch (e) { console.log('cb err:', e.message); }
 });
 
-server.listen(PORT, () => console.log(`HTTP server listening on ${PORT}`));
+// ============ ВЕБХУК CRYPTOBOT ============
+const app = express();
+app.use(express.json({ limit: '1mb' }));
 
-process.on('unhandledRejection', error => console.error('Unhandled rejection:', error));
-process.on('uncaughtException', error => {
-    console.error('Uncaught exception:', error);
+app.post('/cryptobot', async (req, res) => {
+  try {
+    const u = req.body;
+    if (u.update_type === 'invoice_paid') {
+      const userId = Number(u.payload.payload);
+      const amount = Number(u.payload.amount);
+      if (userId && amount > 0) {
+        const w = await getWallet(userId);
+        if (w) {
+          await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + amount).toFixed(8) });
+          bot.sendMessage(userId, `✅ Пополнение +${amount} USDT зачислено!`).catch(() => {});
+        }
+      }
+    }
+    res.sendStatus(200);
+  } catch (e) { res.sendStatus(200); }
 });
+
+app.get('/', (req, res) => res.send('SMaster is running'));
+app.listen(process.env.PORT || 3000, () => console.log('🌐 HTTP listening'));
+
+bot.on('polling_error', (err) => console.log('polling_error:', err.message));
+console.log('🤖 SMaster bot started');
