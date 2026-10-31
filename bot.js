@@ -80,13 +80,13 @@ const i18n = {
 
 // ============ КЛАВИАТУРЫ ============
 function getMainMenu(lang, hasWallet) {
-  const t = i18n[lang] || i18n.ru;
-  const hideReplyKeyboard = { reply_markup: { remove_keyboard: true } };
-
   if (!hasWallet) {
     return {
-      reply_markup: { inline_keyboard: [[{ text: '➕ Создать кошелек / Create Wallet', callback_data: 'create_wallet' }]] },
-      ...hideReplyKeyboard
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '➕ Создать кошелек / Create Wallet', callback_data: 'create_wallet' }]
+        ]
+      }
     };
   }
 
@@ -99,8 +99,7 @@ function getMainMenu(lang, hasWallet) {
         [{ text: '🎁 Рефералка / Referral', callback_data: 'menu_ref' }, { text: '📈 Курсы / Rates', callback_data: 'menu_rates' }],
         [{ text: '⚙️ Настройки / Settings', callback_data: 'menu_settings' }, { text: 'ℹ️ О SMaster', callback_data: 'menu_about' }]
       ]
-    },
-    ...hideReplyKeyboard
+    }
   };
 }
 
@@ -128,6 +127,8 @@ function fmt(n, d = 2) { return Number(n || 0).toFixed(d); }
 bot.onText(/^\/start/, async (msg) => {
   try {
     const chatId = msg.chat.id;
+    
+    // Сначала принудительно убиваем старую клавиатуру
     await bot.sendMessage(chatId, '⏳ Обновляю меню...', { reply_markup: { remove_keyboard: true } });
 
     let w = await getWallet(msg.from.id);
@@ -546,7 +547,6 @@ async function handleClaimCheck(msg, checkId, w, lang) {
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
-// Вебхук CryptoBot
 app.post('/cryptobot', async (req, res) => {
   try {
     const u = req.body;
