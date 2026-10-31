@@ -4,7 +4,6 @@ const { createClient } = require('@supabase/supabase-js');
 
 const BOT_TOKEN = process.env.SMASTER_BOT_TOKEN || process.env.BOT_TOKEN;
 const CRYPTOBOT_TOKEN = process.env.CRYPTOBOT_TOKEN;
-const XROCKET_KEY = process.env.XROCKET_PAY_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
@@ -19,14 +18,12 @@ const TRANSFER_FEE = 0.1;
 
 const states = new Map();
 
-// ============ ТЕКСТЫ (ЛОКАЛИЗАЦИЯ) ============
+// ============ ТЕКСТЫ ============
 const i18n = {
   ru: {
     welcome: 'Привет, {name}! 👋\n\nДобро пожаловать в SMaster.\nТвой надежный крипто-кошелек.',
     balance_text: '👛 **Твой кошелёк**\n\n💰 Баланс:\n• USDT: {usdt}\n• TON: {ton}',
-    deposit_ask: '💳 Выбери способ пополнения:',
-    deposit_cb: '💳 Введи сумму в USDT для пополнения через CryptoBot:',
-    deposit_xr: '🚀 Введи сумму в USDT для пополнения через xRocket:',
+    deposit_ask: '💳 Введи сумму в USDT для пополнения (например 5).',
     transfer_ask_recipient: '📤 Кому перевести? Напиши ID или @username.\n\nКомиссия: 0.1 USDT.',
     transfer_ask_amount: 'Кому: {to}\n\nСколько USDT? (Комиссия: 0.1)',
     transfer_success: '✅ Успешно!\nПереведено: {amount} USDT\nКомиссия: 0.1 USDT\nКому: {to}',
@@ -35,11 +32,11 @@ const i18n = {
     p2p_menu: '🎲 P2P Маркет SMaster\n\nЗдесь ты можешь купить или продать USDT за TON.',
     p2p_buy: '🛒 Купить USDT', p2p_create: '➕ Выставить объявление', p2p_my: '📢 Мои объявления',
     cancel: '⬅️ Назад в меню',
-    settings: '⚙️ **Настройки**\n\nВыбери действие:',
+    settings: '⚙️ **Настройки**\n\nУправляй своим аккаунтом и приложением:',
     ref_link: '🎁 Твоя реферальная ссылка:\n{link}\n\nПриглашай друзей и получай бонусы!',
     rates: '📈 **Курсы (CryptoBot):**\n\n• 1 USDT = {usdt_ton} TON\n• 1 TON = {ton_usdt} USDT\n• 1 USDT = {usdt_rub} RUB',
-    about: 'ℹ️ **О SMaster**\n\nSMaster — это твой быстрый и безопасный Telegram-кошелёк.\n\n🚀 Мы поддерживаем:\n• Мгновенные переводы USDT/TON\n• P2P Маркет\n• Подарочные чеки\n• Пополнения через CryptoBot и xRocket\n\n👨‍💻 Разработчик: Тимур (Solo_Men)\nЕсли есть вопросы, пиши в поддержку.',
-    checks_menu: '🧾 **Чеки SMaster**\n\nЧеки — это крутой способ подарить крипту другу или оплатить что-то. Создай чек, отправь ссылку, и получатель сможет забрать деньги.',
+    about: 'ℹ️ **О SMaster**\n\nSMaster — это твой быстрый и безопасный Telegram-кошелёк.\n\n🚀 Мы поддерживаем:\n• Мгновенные переводы USDT/TON\n• P2P Маркет\n• Подарочные чеки\n• Пополнения через CryptoBot\n\n👨‍💻 Разработчик: Тимур (Solo_Men)\nЕсли есть вопросы, пиши в поддержку.',
+    checks_menu: '🧾 **Чеки SMaster**\n\nЧеки — это крутой способ подарить крипту другу. Создай чек, отправь ссылку, и получатель сможет забрать деньги.',
     check_create: '➕ Создать чек',
     check_activate: '🎁 Активировать по коду',
     check_ask_amount: 'Введи сумму в USDT для создания чека:',
@@ -48,14 +45,13 @@ const i18n = {
     check_claimed: '🎉 Ты успешно активировал чек на {amount} USDT!',
     check_error: '❌ Чек не найден или уже активирован.',
     support: '👨‍💻 **Поддержка**\n\nЕсли у тебя возникли проблемы или вопросы, напиши нашему менеджеру: @TonRocketSupportBot',
-    clear_data: '⚠️ Ты уверен, что хочешь удалить свой кошелёк? Все средства сгорят! (Введи "УДАЛИТЬ" для подтверждения)',
+    delete_wallet: '⚠️ Ты уверен, что хочешь удалить свой кошелёк? Все средства сгорят! (Введи "УДАЛИТЬ" для подтверждения)',
+    profile: '👤 **Мой профиль**\n\nID: {id}\nИмя: {name}\nЯзык: {lang}',
   },
   en: {
     welcome: 'Hello, {name}! 👋\n\nWelcome to SMaster.\nYour reliable crypto wallet.',
     balance_text: '👛 **Your Wallet**\n\n💰 Balance:\n• USDT: {usdt}\n• TON: {ton}',
-    deposit_ask: '💳 Choose deposit method:',
-    deposit_cb: '💳 Enter USDT amount to deposit via CryptoBot:',
-    deposit_xr: '🚀 Enter USDT amount to deposit via xRocket:',
+    deposit_ask: '💳 Enter USDT amount to deposit (e.g. 5).',
     transfer_ask_recipient: '📤 Who to transfer to? Type ID or @username.\n\nFee: 0.1 USDT.',
     transfer_ask_amount: 'To: {to}\n\nHow much USDT? (Fee: 0.1)',
     transfer_success: '✅ Success!\nTransferred: {amount} USDT\nFee: 0.1 USDT\nTo: {to}',
@@ -64,10 +60,10 @@ const i18n = {
     p2p_menu: '🎲 P2P Market SMaster\n\nHere you can buy or sell USDT for TON.',
     p2p_buy: '🛒 Buy USDT', p2p_create: '➕ Create Ad', p2p_my: '📢 My Ads',
     cancel: '⬅️ Back to menu',
-    settings: '⚙️ **Settings**\n\nChoose action:',
+    settings: '⚙️ **Settings**\n\nManage your account and app:',
     ref_link: '🎁 Your referral link:\n{link}\n\nInvite friends and get bonuses!',
     rates: '📈 **Rates (CryptoBot):**\n\n• 1 USDT = {usdt_ton} TON\n• 1 TON = {ton_usdt} USDT\n• 1 USDT = {usdt_rub} RUB',
-    about: 'ℹ️ **About SMaster**\n\nSMaster is your fast and secure Telegram wallet.\n\n🚀 Features:\n• Instant USDT/TON transfers\n• P2P Market\n• Gift checks\n• Deposits via CryptoBot and xRocket',
+    about: 'ℹ️ **About SMaster**\n\nSMaster is your fast and secure Telegram wallet.\n\n🚀 Features:\n• Instant USDT/TON transfers\n• P2P Market\n• Gift checks\n• Deposits via CryptoBot',
     checks_menu: '🧾 **SMaster Checks**\n\nChecks are a great way to gift crypto to a friend. Create a check, send the link, and they can claim it.',
     check_create: '➕ Create Check',
     check_activate: '🎁 Activate by Code',
@@ -77,7 +73,8 @@ const i18n = {
     check_claimed: '🎉 You successfully claimed a check for {amount} USDT!',
     check_error: '❌ Check not found or already claimed.',
     support: '👨‍💻 **Support**\n\nIf you have issues, contact our manager: @TonRocketSupportBot',
-    clear_data: '⚠️ Are you sure you want to delete your wallet? All funds will be lost! (Type "DELETE" to confirm)',
+    delete_wallet: '⚠️ Are you sure you want to delete your wallet? All funds will be lost! (Type "DELETE" to confirm)',
+    profile: '👤 **My Profile**\n\nID: {id}\nName: {name}\nLanguage: {lang}',
   }
 };
 
@@ -127,7 +124,7 @@ async function updateWallet(userId, patch) {
 }
 function fmt(n, d = 2) { return Number(n || 0).toFixed(d); }
 
-// ============ СТАРТ (Обработка Deep Links) ============
+// ============ СТАРТ ============
 bot.onText(/^\/start/, async (msg) => {
   try {
     const chatId = msg.chat.id;
@@ -137,7 +134,6 @@ bot.onText(/^\/start/, async (msg) => {
     let lang = w ? (w.language || 'ru') : 'ru';
     const t = i18n[lang];
 
-    // Проверяем, не пришел ли юзер по ссылке чека
     const textParts = msg.text.split(' ');
     if (textParts.length > 1 && textParts[1].startsWith('check_')) {
       const checkId = textParts[1].split('_')[1];
@@ -154,7 +150,7 @@ bot.onText(/^\/start/, async (msg) => {
   } catch (e) { console.log('start err:', e.message); }
 });
 
-// ============ ОБРАБОТЧИК ТЕКСТА ============
+// ============ ТЕКСТОВЫЙ ВВОД ============
 bot.on('message', async (msg) => {
   try {
     if (!msg.text || msg.text.startsWith('/')) return;
@@ -165,8 +161,7 @@ bot.on('message', async (msg) => {
     const w = await getWallet(userId);
     const lang = w ? (w.language || 'ru') : 'ru';
 
-    if (state.type === 'deposit_cryptobot') return handleDepositInput(msg, lang, 'cryptobot');
-    if (state.type === 'deposit_xrocket') return handleDepositInput(msg, lang, 'xrocket');
+    if (state.type === 'deposit') return handleDepositInput(msg, lang);
     if (state.type === 'transfer_recipient') return handleTransferRecipient(msg, lang);
     if (state.type === 'transfer_amount') return handleTransferAmount(msg, state, lang);
     if (state.type === 'p2p_amount') return handleP2pAmount(msg, lang);
@@ -178,7 +173,7 @@ bot.on('message', async (msg) => {
   } catch (e) { console.log('msg err:', e.message); }
 });
 
-// ============ CALLBACK'И ============
+// ============ CALLBACK'И (Кнопки) ============
 bot.on('callback_query', async (query) => {
   try {
     const data = query.data;
@@ -209,7 +204,7 @@ bot.on('callback_query', async (query) => {
     // --- СОЗДАНИЕ КОШЕЛЬКА ---
     if (data === 'create_wallet') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      const res = await createWallet(query.from, lang);
+      await createWallet(query.from, lang);
       return bot.sendMessage(chatId, '✅ Кошелёк создан! / Wallet created!', getMainMenu(lang, true));
     }
 
@@ -221,26 +216,11 @@ bot.on('callback_query', async (query) => {
       });
     }
 
-    // --- ПОПОЛНЕНИЕ (Выбор способа) ---
+    // --- ПОПОЛНЕНИЕ ---
     if (data === 'menu_deposit') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, t.deposit_ask, {
-        reply_markup: { inline_keyboard: [
-          [{ text: '💳 CryptoBot (USDT)', callback_data: 'dep_cb' }],
-          [{ text: '🚀 xRocket Pay', callback_data: 'dep_xr' }],
-          [{ text: t.cancel, callback_data: 'back_to_menu' }]
-        ]}
-      });
-    }
-    if (data === 'dep_cb') {
-      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      states.set(userId, { type: 'deposit_cryptobot' });
-      return bot.sendMessage(chatId, t.deposit_cb, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] } });
-    }
-    if (data === 'dep_xr') {
-      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      states.set(userId, { type: 'deposit_xrocket' });
-      return bot.sendMessage(chatId, t.deposit_xr, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] } });
+      states.set(userId, { type: 'deposit' });
+      return bot.sendMessage(chatId, t.deposit_ask, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] } });
     }
 
     // --- ПЕРЕВОД ---
@@ -294,20 +274,26 @@ bot.on('callback_query', async (query) => {
         reply_markup: {
           inline_keyboard: [
             [{ text: '🇷🇺 Русский', callback_data: 'lang_ru' }, { text: '🇬🇧 English', callback_data: 'lang_en' }],
-            [{ text: '👨‍💻 Поддержка', callback_data: 'menu_support' }],
-            [{ text: '⚠️ Удалить кошелёк', callback_data: 'menu_delete' }],
+            [{ text: '👤 Профиль / Profile', callback_data: 'set_profile' }],
+            [{ text: '👨‍💻 Поддержка / Support', callback_data: 'set_support' }],
+            [{ text: '⚠️ Удалить кошелёк', callback_data: 'set_delete' }],
             [{ text: t.cancel, callback_data: 'back_to_menu' }]
           ]
         }
       });
     }
-    if (data === 'menu_support') {
+    if (data === 'set_profile') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const text = t.profile.replace('{id}', w.user_id).replace('{name}', w.username ? '@' + w.username : 'None').replace('{lang}', lang.toUpperCase());
+      return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'menu_settings' }]] } });
+    }
+    if (data === 'set_support') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       return bot.sendMessage(chatId, t.support, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'menu_settings' }]] } });
     }
-    if (data === 'menu_delete') {
+    if (data === 'set_delete') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, t.clear_data, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'menu_settings' }]] } });
+      return bot.sendMessage(chatId, t.delete_wallet, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'menu_settings' }]] } });
     }
 
     // ================= ЧЕКИ =================
@@ -401,8 +387,8 @@ bot.on('callback_query', async (query) => {
   } catch (e) { console.log('cb err:', e.message); }
 });
 
-// ============ ЛОГИКА ВВОДА ============
-async function handleDepositInput(msg, lang, type) {
+// ============ ФУНКЦИИ ВВОДА ============
+async function handleDepositInput(msg, lang) {
   const chatId = msg.chat.id;
   const amount = Number(msg.text.replace(',', '.'));
   const t = i18n[lang];
@@ -412,30 +398,16 @@ async function handleDepositInput(msg, lang, type) {
   const temp = await bot.sendMessage(chatId, '⏳...');
   
   try {
-    if (type === 'cryptobot') {
-      const res = await fetch('https://pay.crypt.bot/api/createInvoice', {
-        method: 'POST',
-        headers: { 'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ asset: 'USDT', amount: String(amount), description: `Deposit #${msg.from.id}`, payload: String(msg.from.id), allow_comments: false, allow_anonymous: false, expires_in: 3600 })
-      });
-      const data = await res.json();
-      await bot.deleteMessage(chatId, temp.message_id).catch(() => {});
-      if (!data.ok) return bot.sendMessage(chatId, '❌ Ошибка.', getMainMenu(lang, true));
-      await bot.sendMessage(chatId, `💳 Счёт на ${amount} USDT создан!\n\nОплати по ссылке:\n${data.result.bot_invoice_url}`, getMainMenu(lang, true));
-    } 
-    else if (type === 'xrocket') {
-      // xRocket Pay API
-      const res = await fetch('https://pay.xrocket.exchange/api/v1/invoices', {
-        method: 'POST',
-        headers: { 'Rocket-Pay-Key': XROCKET_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: String(amount), currency: 'USDT', description: `Deposit #${msg.from.id}`, hidden_message: `User ID: ${msg.from.id}`, callback_url: 'https://pay.xrocket.exchange' })
-      });
-      const data = await res.json();
-      await bot.deleteMessage(chatId, temp.message_id).catch(() => {});
-      if (!data || !data.link) return bot.sendMessage(chatId, '❌ Ошибка xRocket.', getMainMenu(lang, true));
-      await bot.sendMessage(chatId, `🚀 Счёт на ${amount} USDT создан (xRocket)!\n\nОплати по ссылке:\n${data.link}`, getMainMenu(lang, true));
-    }
-  } catch (e) { await bot.deleteMessage(chatId, temp.message_id).catch(() => {}); await bot.sendMessage(chatId, '❌ Ошибка.', getMainMenu(lang, true)); }
+    const res = await fetch('https://pay.crypt.bot/api/createInvoice', {
+      method: 'POST',
+      headers: { 'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ asset: 'USDT', amount: String(amount), description: `Deposit #${msg.from.id}`, payload: String(msg.from.id), allow_comments: false, allow_anonymous: false, expires_in: 3600 })
+    });
+    const data = await res.json();
+    await bot.deleteMessage(chatId, temp.message_id).catch(() => {});
+    if (!data.ok) return bot.sendMessage(chatId, '❌ Ошибка.', getMainMenu(lang, true));
+    await bot.sendMessage(chatId, `💳 Счёт на ${amount} USDT создан!\n\nОплати по ссылке:\n${data.result.bot_invoice_url}`, getMainMenu(lang, true));
+  } catch (e) { await bot.sendMessage(chatId, '❌ Ошибка.', getMainMenu(lang, true)); }
 }
 
 async function handleTransferRecipient(msg, lang) {
@@ -515,7 +487,7 @@ async function handleP2pPrice(msg, state, lang) {
   await bot.sendMessage(chatId, `✅ Объявление #${data[0].id} создано!\n\nПродаёшь: ${state.amount} USDT\nЦена: ${price} ${state.currency}`, getMainMenu(lang, true));
 }
 
-// ============ ЧЕКИ (ФУНКЦИИ) ============
+// ============ ЧЕКИ ============
 async function handleCreateCheckAmount(msg, w, lang) {
   const chatId = msg.chat.id;
   const amount = Number(msg.text.replace(',', '.'));
@@ -527,10 +499,8 @@ async function handleCreateCheckAmount(msg, w, lang) {
     return bot.sendMessage(chatId, t.low_balance, getMainMenu(lang, true));
   }
   
-  // Списываем баланс сразу
   await updateWallet(msg.from.id, { balance_usdt: (Number(w.balance_usdt) - amount).toFixed(8) });
   
-  // Создаем чек в базе
   const { data, error } = await supabase.from('smaster_checks').insert({ creator_id: String(msg.from.id), amount: amount, status: 'active' }).select();
   states.delete(msg.from.id);
   
@@ -547,13 +517,11 @@ async function handleClaimCheck(msg, checkId, w, lang) {
   const t = i18n[lang];
   
   if (!w) {
-    // Если у юзера нет кошелька, сначала просим выбрать язык
     return bot.sendMessage(chatId, '🇷🇺 Сначала выбери язык / First choose language:', {
       reply_markup: { inline_keyboard: [[{ text: '🇷🇺 Русский', callback_data: `claim_lang_ru_${checkId}` }], [{ text: '🇬🇧 English', callback_data: `claim_lang_en_${checkId}` }]] }
     });
   }
 
-  // Ищем чек
   const { data: arr } = await supabase.from('smaster_checks').select('*').eq('id', Number(checkId)).limit(1);
   const check = arr && arr.length > 0 ? arr[0] : null;
   
@@ -567,7 +535,6 @@ async function handleClaimCheck(msg, checkId, w, lang) {
     return bot.sendMessage(chatId, '❌ Ты не можешь активировать свой же чек.', getMainMenu(lang, true));
   }
   
-  // Активируем чек
   await supabase.from('smaster_checks').update({ status: 'claimed', claimed_by: String(msg.from.id) }).eq('id', check.id);
   await updateWallet(msg.from.id, { balance_usdt: (Number(w.balance_usdt) + Number(check.amount)).toFixed(8) });
   
@@ -593,21 +560,6 @@ app.post('/cryptobot', async (req, res) => {
           bot.sendMessage(userId, `✅ +${amount} USDT deposited!`).catch(() => {});
         }
       }
-    }
-    res.sendStatus(200);
-  } catch (e) { res.sendStatus(200); }
-});
-
-// Вебхук xRocket
-app.post('/xrocket', async (req, res) => {
-  try {
-    const u = req.body;
-    // xRocket присылает статус оплаты
-    if (u.status === 'paid' || u.type === 'invoice_paid') {
-       // В xRocket Pay API полезная нагрузка может отличаться, 
-       // но если ты используешь callback_url, мы можем достать ID из описания или скрытого сообщения
-       // Для надежности, xRocket Pay требует проверки сигнатуры, но для простоты сделаем так:
-       console.log('xRocket webhook:', u);
     }
     res.sendStatus(200);
   } catch (e) { res.sendStatus(200); }
