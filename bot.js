@@ -12,7 +12,7 @@ http.createServer((req, res) => {
 
 // --- НАСТРОЙКИ ---
 const TOKEN = process.env.SMASTER_BOT_TOKEN;
-const SUPABASE_URL = 'https://dnrbvyuoiphvkezwxbc.supabase.co';
+const SUPABASE_URL = 'https://dnrbvyuoiiphvkezwxbc.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const CRYPTOBOT_TOKEN = process.env.CRYPTOBOT_TOKEN;
 
