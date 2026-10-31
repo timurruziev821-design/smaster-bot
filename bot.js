@@ -9,17 +9,16 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
-  console.error('❌ ОШИБКА: Не заданы токены в переменных окружения Render!');
+  console.error('❌ ОШИБКА: Не заданы переменные в Render!');
   process.exit(1);
 }
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// КОМИССИЯ
-const TRANSFER_FEE = 0.1; 
+const TRANSFER_FEE = 0.1; // Комиссия при переводе
 
-// ============ ГЛАВНОЕ МЕНЮ ============
+// ============ КЛАВИАТУРА ============
 const MAIN_MENU = {
   reply_markup: {
     keyboard: [
@@ -32,49 +31,77 @@ const MAIN_MENU = {
   }
 };
 
-// ============ ХЕЛПЕРЫ ============
+// ============ ХЕЛПЕРЫ (С ЗАЩИТОЙ ОТ ОШИБОК) ============
 async function getWallet(userId) {
   try {
-    const { data, error } = await supabase.from('smaster_wallets').select('*').eq('user_id', userId).maybeSingle();
-    if (error) { console.log('getWallet err:', error.message); return null; }
-    return data;
-  } catch (e) { return null; }
+    const { data, error } = await supabase
+      .from('smaster_wallets')
+      .select('*')
+      .eq('user_id', String(userId)) // String защищает от несовпадения типов
+      .limit(1);
+      
+    if (error) {
+      console.error('❌ ОШИБКА БАЗЫ (getWallet):', error.message);
+      return null;
+    }
+    return data && data.length > 0 ? data[0] : null;
+  } catch (e) {
+    console.error('❌ КРИТ. ОШИБКА (getWallet):', e.message);
+    return null;
+  }
 }
 
 async function ensureWallet(msg) {
   try {
-    let w = await getWallet(msg.from.id);
-    if (!w) {
-      const { data } = await supabase.from('smaster_wallets').insert({
-        user_id: msg.from.id,
+    const userId = msg.from.id;
+    let w = await getWallet(userId);
+    if (w) return w;
+
+    console.log(`ℹ️ Создаю кошелек для ${userId}...`);
+    const { data, error } = await supabase
+      .from('smaster_wallets')
+      .insert({
+        user_id: String(userId),
         username: msg.from.username || null,
         balance_usdt: 0,
         balance_ton: 0
-      }).select().single();
-      return data;
-    } else if (msg.from.username && w.username !== msg.from.username) {
-      await supabase.from('smaster_wallets').update({ username: msg.from.username }).eq('user_id', msg.from.id);
+      })
+      .select();
+
+    if (error) {
+      console.error('❌ ОШИБКА БАЗЫ (ensureWallet insert):', error.message);
+      return null;
     }
-    return w;
-  } catch (e) { console.log('ensureWallet err:', e.message); return null; }
+    return data && data.length > 0 ? data[0] : null;
+  } catch (e) {
+    console.error('❌ КРИТ. ОШИБКА (ensureWallet):', e.message);
+    return null;
+  }
 }
 
 async function updateWallet(userId, patch) {
   try {
-    const { error } = await supabase.from('smaster_wallets').update(patch).eq('user_id', userId);
-    if (error) console.log('updateWallet err:', error.message);
-  } catch (e) { console.log('updateWallet catch:', e.message); }
+    const { error } = await supabase
+      .from('smaster_wallets')
+      .update(patch)
+      .eq('user_id', String(userId));
+    if (error) console.error('❌ ОШИБКА БАЗЫ (updateWallet):', error.message);
+  } catch (e) {
+    console.error('❌ КРИТ. ОШИБКА (updateWallet):', e.message);
+  }
 }
 
 function fmt(n, d = 2) { return Number(n || 0).toFixed(d); }
 
-// ============ СОСТОЯНИЯ ============
 const states = new Map();
 
 // ============ СТАРТ ============
 bot.onText(/^\/start/, async (msg) => {
   try {
-    await ensureWallet(msg);
+    const w = await ensureWallet(msg);
+    if (!w) {
+      return bot.sendMessage(msg.chat.id, '❌ Ошибка при создании кошелька. Проверь логи Render.');
+    }
     await bot.sendMessage(msg.chat.id,
       `Привет, ${msg.from.first_name || 'друг'}! 👋\n\nДобро пожаловать в SMaster — твой крипто-кошелёк.\nВыбирай действие в меню ниже 👇`,
       MAIN_MENU
@@ -90,7 +117,6 @@ bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
-    // Машина состояний (ожидание ввода)
     const state = states.get(userId);
     if (state) {
       if (text === '⬅️ Назад' || text.toLowerCase() === 'отмена' || text === '/cancel') {
@@ -103,7 +129,6 @@ bot.on('message', async (msg) => {
       return;
     }
 
-    // Кнопки
     if (text === '💰 Баланс') return handleBalance(msg);
     if (text === '💳 Пополнить') {
       states.set(userId, { type: 'deposit' });
@@ -129,7 +154,11 @@ async function handleBalance(msg) {
     const w = await getWallet(msg.from.id);
     await bot.deleteMessage(chatId, temp.message_id).catch(() => {});
     
-    if (!w) return bot.sendMessage(chatId, 'Кошелёк не найден. Напиши /start', MAIN_MENU);
+    if (!w) {
+      console.log('⚠️ Баланс не найден для юзера:', msg.from.id);
+      return bot.sendMessage(chatId, 'Кошелёк не найден в базе. Напиши /start', MAIN_MENU);
+    }
+    
     await bot.sendMessage(chatId,
       `💰 Твой баланс:\n\n• USDT: ${fmt(w.balance_usdt)}\n• TON: ${fmt(w.balance_ton)}`,
       MAIN_MENU
@@ -169,7 +198,7 @@ async function handleDepositInput(msg) {
   }
 }
 
-// ============ ПЕРЕВОД (С КОМИССИЕЙ 0.1) ============
+// ============ ПЕРЕВОД ============
 async function handleTransferInput(msg, state) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -178,14 +207,14 @@ async function handleTransferInput(msg, state) {
     const t = msg.text.trim();
     let recipient = null;
     if (t.startsWith('@')) {
-      const { data } = await supabase.from('smaster_wallets').select('*').ilike('username', t.slice(1)).maybeSingle();
-      recipient = data;
+      const { data } = await supabase.from('smaster_wallets').select('*').ilike('username', t.slice(1)).limit(1);
+      recipient = data && data.length > 0 ? data[0] : null;
     } else {
       const rid = Number(t);
       if (rid) recipient = await getWallet(rid);
     }
     if (!recipient) return bot.sendMessage(chatId, '❌ Пользователь не найден. Введи ID или @username. Или «отмена».');
-    if (recipient.user_id === userId) return bot.sendMessage(chatId, '❌ Нельзя перевести самому себе.');
+    if (String(recipient.user_id) === String(userId)) return bot.sendMessage(chatId, '❌ Нельзя перевести самому себе.');
     
     states.set(userId, { type: 'transfer', step: 'amount', to: recipient.user_id, toName: recipient.username || recipient.user_id });
     return bot.sendMessage(chatId, `Кому: ${recipient.username ? '@' + recipient.username : recipient.user_id}\n\nСколько USDT перевести? (Комиссия: 0.1 USDT)`);
@@ -209,7 +238,6 @@ async function handleTransferInput(msg, state) {
       return bot.sendMessage(chatId, '❌ Получатель больше не существует.', MAIN_MENU);
     }
     
-    // Списываем с отправителя (сумма + комиссия), начисляем получателю (сумма)
     await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) - totalDeduct).toFixed(8) });
     await updateWallet(state.to, { balance_usdt: (Number(to.balance_usdt) + amount).toFixed(8) });
     states.delete(userId);
@@ -219,7 +247,7 @@ async function handleTransferInput(msg, state) {
   }
 }
 
-// ============ РАКЕТА (ШАНС 1 НА МИЛЛИОН) ============
+// ============ РАКЕТА ============
 async function handleRocket(msg) {
   const chatId = msg.chat.id;
   const win = Math.random() < 0.000001; // 1 на миллион
@@ -243,12 +271,11 @@ async function handleReferral(msg) {
   }
 }
 
-// ============ КУРСЫ С CRYPTOBOT ============
+// ============ КУРСЫ ============
 async function handleRates(msg) {
   const chatId = msg.chat.id;
   try {
     const temp = await bot.sendMessage(chatId, '⏳ Загружаю курсы с CryptoBot...');
-    // Запрос к CryptoBot API для получения курсов
     const res = await fetch('https://pay.crypt.bot/api/getExchangeRates', {
       method: 'GET',
       headers: { 'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN }
@@ -257,9 +284,8 @@ async function handleRates(msg) {
     
     await bot.deleteMessage(chatId, temp.message_id).catch(() => {});
     
-    if (!data.ok) return bot.sendMessage(chatId, 'Не смог загрузить курсы. Попробуй позже.', MAIN_MENU);
+    if (!data.ok) return bot.sendMessage(chatId, 'Не смог загрузить курсы.', MAIN_MENU);
     
-    // Находим нужные пары
     const usdtTon = data.result.find(r => r.source === 'USDT' && r.target === 'TON');
     const tonUsdt = data.result.find(r => r.source === 'TON' && r.target === 'USDT');
     const usdtRub = data.result.find(r => r.source === 'USDT' && r.target === 'RUB');
@@ -276,7 +302,7 @@ async function handleRates(msg) {
   }
 }
 
-// ============ P2P МЕНЮ ============
+// ============ P2P ============
 async function handleP2PMenu(msg) {
   await bot.sendMessage(msg.chat.id, '🔄 P2P Маркет SMaster\n\nВыбирай действие:', {
     reply_markup: {
@@ -289,7 +315,6 @@ async function handleP2PMenu(msg) {
   });
 }
 
-// ============ СОЗДАНИЕ ОБЪЯВЛЕНИЯ ============
 async function handleCreateInput(msg, state) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -316,40 +341,38 @@ async function handleCreateInput(msg, state) {
     const w = await getWallet(userId);
     if (!w || Number(w.balance_usdt) < state.amount) {
       states.delete(userId);
-      return bot.sendMessage(chatId, '❌ У тебя недостаточно USDT для такого объявления.', MAIN_MENU);
+      return bot.sendMessage(chatId, '❌ У тебя недостаточно USDT для этого объявления.', MAIN_MENU);
     }
     
     const { data, error } = await supabase.from('smaster_p2p_ads').insert({
-      seller_id: userId, seller_username: msg.from.username || null,
+      seller_id: String(userId), seller_username: msg.from.username || null,
       amount: state.amount, price: price, currency: state.currency
-    }).select().single();
+    }).select();
     
     states.delete(userId);
-    if (error || !data) return bot.sendMessage(chatId, '❌ Не смог создать объявление.', MAIN_MENU);
+    if (error || !data || data.length === 0) return bot.sendMessage(chatId, '❌ Не смог создать объявление.', MAIN_MENU);
     
-    await bot.sendMessage(chatId, `✅ Объявление #${data.id} создано!\n\nПродаёшь: ${state.amount} USDT\nЦена: ${price} ${state.currency} за 1 USDT\nИтого: ${fmt(state.amount * price)} ${state.currency}`, MAIN_MENU);
+    await bot.sendMessage(chatId, `✅ Объявление #${data[0].id} создано!\n\nПродаёшь: ${state.amount} USDT\nЦена: ${price} ${state.currency} за 1 USDT\nИтого: ${fmt(state.amount * price)} ${state.currency}`, MAIN_MENU);
   }
 }
 
-// ============ CALLBACK'И (INLINE КНОПКИ) ============
+// ============ CALLBACK'И ============
 bot.on('callback_query', async (query) => {
   try {
     const data = query.data;
     const chatId = query.message.chat.id;
     const userId = query.from.id;
-    await bot.answerCallbackQuery(query.id).catch(() => {}); // Сразу гасим загрузку кнопки
+    await bot.answerCallbackQuery(query.id).catch(() => {});
 
-    // Создание объявления
     if (data === 'p2p_create') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       states.set(userId, { type: 'p2p_create', step: 'amount' });
       return bot.sendMessage(chatId, '➕ Сколько USDT продаёшь? Напиши число.\n\nИли «отмена».');
     }
 
-    // Список на покупку
     if (data === 'p2p_buy') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      const { data: ads } = await supabase.from('smaster_p2p_ads').select('*').eq('status', 'active').neq('seller_id', userId).order('created_at', { ascending: false }).limit(10);
+      const { data: ads } = await supabase.from('smaster_p2p_ads').select('*').eq('status', 'active').neq('seller_id', String(userId)).order('created_at', { ascending: false }).limit(10);
       
       if (!ads || ads.length === 0) return bot.sendMessage(chatId, '🛒 Пока нет активных объявлений.', MAIN_MENU);
       
@@ -357,11 +380,11 @@ bot.on('callback_query', async (query) => {
       return bot.sendMessage(chatId, '🛒 Активные объявления:', { reply_markup: { inline_keyboard: buttons } });
     }
 
-    // Просмотр объявления
     if (data.startsWith('p2p_view_')) {
       const id = Number(data.split('_')[2]);
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      const { data: ad } = await supabase.from('smaster_p2p_ads').select('*').eq('id', id).maybeSingle();
+      const { data: arr } = await supabase.from('smaster_p2p_ads').select('*').eq('id', id).limit(1);
+      const ad = arr && arr.length > 0 ? arr[0] : null;
       
       if (!ad || ad.status !== 'active') return bot.sendMessage(chatId, '❌ Объявление недоступно.', MAIN_MENU);
       
@@ -374,14 +397,14 @@ bot.on('callback_query', async (query) => {
       );
     }
 
-    // Сама покупка
     if (data.startsWith('p2p_buy_')) {
       const id = Number(data.split('_')[2]);
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      const { data: ad } = await supabase.from('smaster_p2p_ads').select('*').eq('id', id).maybeSingle();
+      const { data: arr } = await supabase.from('smaster_p2p_ads').select('*').eq('id', id).limit(1);
+      const ad = arr && arr.length > 0 ? arr[0] : null;
       
       if (!ad || ad.status !== 'active') return bot.sendMessage(chatId, '❌ Объявление недоступно.', MAIN_MENU);
-      if (ad.seller_id === userId) return bot.sendMessage(chatId, '❌ Нельзя купить своё.', MAIN_MENU);
+      if (String(ad.seller_id) === String(userId)) return bot.sendMessage(chatId, '❌ Нельзя купить своё.', MAIN_MENU);
 
       const amount = Number(ad.amount);
       const price = Number(ad.price);
@@ -391,7 +414,6 @@ bot.on('callback_query', async (query) => {
         return bot.sendMessage(chatId, `💬 Свяжись с @${ad.seller_username || 'id'+ad.seller_id}\n\nПереведи ${fmt(total)} RUB и напиши ему.`, MAIN_MENU);
       }
 
-      // Сделка TON
       const buyer = await getWallet(userId);
       const seller = await getWallet(ad.seller_id);
       
@@ -407,19 +429,17 @@ bot.on('callback_query', async (query) => {
         return bot.sendMessage(chatId, '❌ У продавца нет USDT. Объявление отменено.', MAIN_MENU);
       }
 
-      // Переводим
       await updateWallet(userId, { balance_ton: (Number(buyer.balance_ton) - total).toFixed(8), balance_usdt: (Number(buyer.balance_usdt) + amount).toFixed(8) });
       await updateWallet(ad.seller_id, { balance_ton: (Number(seller.balance_ton) + total).toFixed(8), balance_usdt: (Number(seller.balance_usdt) - amount).toFixed(8) });
-      await supabase.from('smaster_p2p_ads').update({ status: 'completed', buyer_id: userId }).eq('id', ad.id);
+      await supabase.from('smaster_p2p_ads').update({ status: 'completed', buyer_id: String(userId) }).eq('id', ad.id);
 
       await bot.sendMessage(chatId, `✅ Сделка #${ad.id} завершена!\n\n+${amount} USDT\n−${fmt(total)} TON`, MAIN_MENU);
       bot.sendMessage(ad.seller_id, `✅ Твоё объявление #${ad.id} куплено!\n\n−${amount} USDT\n+${fmt(total)} TON`).catch(() => {});
     }
 
-    // Мои объявления
     if (data === 'p2p_my') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      const { data: ads } = await supabase.from('smaster_p2p_ads').select('*').eq('seller_id', userId).eq('status', 'active');
+      const { data: ads } = await supabase.from('smaster_p2p_ads').select('*').eq('seller_id', String(userId)).eq('status', 'active');
       if (!ads || ads.length === 0) return bot.sendMessage(chatId, '📢 У тебя нет активных объявлений.', MAIN_MENU);
       
       for (const ad of ads) {
@@ -430,11 +450,10 @@ bot.on('callback_query', async (query) => {
       return bot.sendMessage(chatId, '⬆️ Твои объявления.', MAIN_MENU);
     }
 
-    // Отмена
     if (data.startsWith('p2p_cancel_')) {
       const id = Number(data.split('_')[2]);
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      await supabase.from('smaster_p2p_ads').update({ status: 'cancelled' }).eq('id', id).eq('seller_id', userId);
+      await supabase.from('smaster_p2p_ads').update({ status: 'cancelled' }).eq('id', id).eq('seller_id', String(userId));
       return bot.sendMessage(chatId, `✅ Объявление #${id} отменено.`, MAIN_MENU);
     }
 
@@ -449,7 +468,7 @@ app.post('/cryptobot', async (req, res) => {
   try {
     const u = req.body;
     if (u.update_type === 'invoice_paid') {
-      const userId = Number(u.payload.payload);
+      const userId = u.payload.payload;
       const amount = Number(u.payload.amount);
       if (userId && amount > 0) {
         const w = await getWallet(userId);
