@@ -750,7 +750,20 @@ async function handleSetWallet(msg, w) {
   await bot.sendMessage(chatId, i18n.ru.wallet_linked.replace('{addr}', addr), getSettingsMenu());
 }
 
-const app = express();
+const app = express();// ============ АДМИН ПАНЕЛЬ ============
+bot.onText(/^\/admin/, async (msg) => {
+  if (String(msg.from.id) !== ADMIN_ID) return; // Если это не ты — игнор
+  await bot.sendMessage(msg.chat.id, '👑 <b>Админ-панель SMaster</b>\n\nВыбери действие:', {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '👥 Кол-во юзеров', callback_data: 'adm_users' }],
+        [{ text: '💰 Выдать баланс', callback_data: 'adm_give' }],
+        [{ text: '📢 Рассылка', callback_data: 'adm_broadcast' }],
+        [{ text: '⬅️ В меню', callback_data: 'back_to_menu' }]
+      ]
+    }, parse_mode: 'HTML'
+  });
+});
 app.use(express.json({ limit: '1mb' }));
 app.post('/cryptobot', async (req, res) => {
   try {
