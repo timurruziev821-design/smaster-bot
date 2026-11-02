@@ -39,7 +39,7 @@ const i18n = {
     swap_menu: '💱 <b>Обмен валют</b>\n\nВыбери направление:\n<i>(Комиссия сервиса: 2%)</i>',
     swap_ask_amount: '💱 Введи сумму <b>{currency}</b> для обмена:',
     swap_success: '✅ <b>Обмен успешен!</b>\n\nТы обменял: <code>{amount} {from}</code>\nПолучил: <code>{to_amount} {to}</code>\nКомиссия: <code>{fee} {from}</code>',
-    p2p_menu: '🎲 <b>P2P Маркет SMaster</b>\n\nПокупай и продавай USDT за TON напрямую другим пользователям.',
+    p2p_menu: '💠 <b>Здесь вы можете купить или продать криптовалюту переводом на карту или электронный кошелёк.</b>\n\n<a href="https://t.me/Solo_Men_Studio">Смотреть видеоинструкцию ></a>',
     check_menu: '🧾 <b>Чеки SMaster</b>\n\nСоздай чек и отправь ссылку другу. Он сможет забрать крипту себе.',
     settings: '⚙️ <b>Настройки</b>\n\nУправляй своим аккаунтом и приложением:',
     profile: '👤 <b>Мой профиль</b>\n\n🆔 ID: <code>{id}</code>\n👤 Имя: {name}\n🌐 Язык: {lang}\n💱 Валюта: {curr}\n📅 В системе с: {date}\n\n🛡 Статус: <b>Verified</b>',
@@ -67,7 +67,12 @@ const i18n = {
     ref_menu: '🎁 <b>Реферальная система</b>\n\nПриглашай друзей и получай <b>5%</b> от их комиссий!\n\n👥 Приглашено: <b>{count}</b>\n💰 Заработано: <b>{earned} USDT</b>\n\n🔗 Твоя ссылка:\n{link}',
     earn_menu: '💼 <b>EARN (Задания)</b>\n\nВыполняй простые задания и получай USDT на баланс!',
     earn_task_1: '📢 Подписаться на канал Solo_Men Studio',
-    earn_success: '✅ <b>Задание выполнено!</b>\n\nТы получил <code>{amount} USDT</code> на баланс!'
+    earn_success: '✅ <b>Задание выполнено!</b>\n\nТы получил <code>{amount} USDT</code> на баланс!',
+    spin_menu: '🎲 <b>Колесо Фортуны</b>\n\nИспытай удачу! Стоимость спина — <b>0.1 USDT</b>.\nМожно выиграть от 0.01 до 10 USDT!\n\nКрути!',
+    spin_win: '🎰 <b>Крутим колесо...</b> 🎰\n\n🎉 <b>ДЖЕКПОТ!</b> Ты выиграл <code>{amount} USDT</code>!\n\nТвой баланс: <code>{balance} USDT</code>',
+    spin_lose: '🎰 <b>Крутим колесо...</b> 🎰\n\n😢 Не повезло. Попробуй еще раз!\n\nТвой баланс: <code>{balance} USDT</code>',
+    set_nick_ask: '👤 Введи свой новый ник (до 20 символов):',
+    set_nick_success: '✅ Твой новый ник: <b>{nick}</b>'
   }
 };
 
@@ -92,12 +97,11 @@ function getSettingsMenu() {
   return {
     reply_markup: {
       inline_keyboard: [
-        [{ text: '👁 Отображение баланса', callback_data: 'set_bal' }],
-        [{ text: '💱 Валюта бота', callback_data: 'set_curr' }],
+        [{ text: '👤 Сменить ник', callback_data: 'set_nick' }, { text: '👁 Отображение', callback_data: 'set_bal' }],
+        [{ text: '💱 Валюта бота', callback_data: 'set_curr' }, { text: '📊 Лимиты', callback_data: 'set_limits' }],
+        [{ text: '🎲 Колесо Фортуны', callback_data: 'menu_spin', style: 'success' }],
         [{ text: '📜 История действий', callback_data: 'set_hist' }],
-        [{ text: '📊 Лимиты и комиссии', callback_data: 'set_limits' }],
-        [{ text: '🔗 Connect Wallet', callback_data: 'set_wallet', style: 'primary' }],
-        [{ text: '🛡 Безопасность', callback_data: 'set_security' }],
+        [{ text: '🔗 Connect Wallet', callback_data: 'set_wallet', style: 'primary' }, { text: '🛡 Безопасность', callback_data: 'set_security' }],
         [{ text: '⬅️ Назад в меню', callback_data: 'back_to_menu', style: 'danger' }]
       ]
     }
@@ -179,6 +183,12 @@ bot.on('message', async (msg) => {
     if (state.type === 'check_multi_amount') return handleCreateMultiCheck(msg, w);
     if (state.type === 'check_activate_code') return handleClaimCheck(msg, msg.text.trim(), w);
     if (state.type === 'set_wallet_ask') return handleSetWallet(msg, w);
+    if (state.type === 'set_nick_input') {
+      if (msg.text.length > 20) return bot.sendMessage(chatId, '❌ Ник слишком длинный (макс 20 символов).');
+      await updateWallet(userId, { custom_nick: msg.text });
+      states.delete(userId);
+      return bot.sendMessage(chatId, i18n.ru.set_nick_success.replace('{nick}', msg.text), { ...getSettingsMenu(), parse_mode: 'HTML' });
+    }
   } catch (e) { console.log('msg err:', e.message); }
 });bot.on('callback_query', async (query) => {
   try {
@@ -235,13 +245,48 @@ bot.on('message', async (msg) => {
     if (data === 'set_profile') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       const d = w.created_at ? new Date(w.created_at).toLocaleDateString() : 'Неизвестно';
-      const text = i18n.ru.profile.replace('{id}', w.user_id).replace('{name}', w.username ? '@' + w.username : 'None').replace('{lang}', 'RU').replace('{curr}', w.bot_currency || 'USD').replace('{date}', d);
+      const displayName = w.custom_nick ? w.custom_nick : (w.username ? '@' + w.username : 'None');
+      const text = i18n.ru.profile.replace('{id}', w.user_id).replace('{name}', displayName).replace('{lang}', 'RU').replace('{curr}', w.bot_currency || 'USD').replace('{date}', d);
       return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
     }
 
     if (data === 'menu_settings') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       return bot.sendMessage(chatId, i18n.ru.settings, { ...getSettingsMenu(), parse_mode: 'HTML' });
+    }
+
+    if (data === 'set_nick') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      states.set(userId, { type: 'set_nick_input' });
+      return bot.sendMessage(chatId, i18n.ru.set_nick_ask, { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'menu_settings' }]] }, parse_mode: 'HTML' });
+    }
+
+    if (data === 'menu_spin') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      if (Number(w.balance_usdt) < 0.1) return bot.sendMessage(chatId, '❌ Нужно минимум 0.1 USDT для спина!', { ...getMainMenu(true), parse_mode: 'HTML' });
+      
+      // Забираем 0.1 USDT
+      let newBalance = Number(w.balance_usdt) - 0.1;
+      let winAmount = 0;
+      
+      // Логика выигрыша (Дом всегда в плюсе)
+      const roll = Math.random();
+      if (roll < 0.70) winAmount = 0; // 70% проигрыш
+      else if (roll < 0.85) winAmount = 0.05; // 15% - 0.05
+      else if (roll < 0.95) winAmount = 0.2; // 10% - 0.2
+      else if (roll < 0.99) winAmount = 1.0; // 4% - 1.0
+      else winAmount = 10.0; // 1% - ДЖЕКПОТ 10 USDT
+
+      newBalance += winAmount;
+      
+      await updateWallet(userId, { balance_usdt: newBalance.toFixed(8) });
+      if (winAmount > 0) await logHistory(userId, 'win', winAmount, 'USDT');
+      
+      const text = winAmount > 0 
+        ? i18n.ru.spin_win.replace('{amount}', fmt(winAmount)).replace('{balance}', fmt(newBalance))
+        : i18n.ru.spin_lose.replace('{balance}', fmt(newBalance));
+        
+      return bot.sendMessage(chatId, text, { ...getMainMenu(true), parse_mode: 'HTML' });
     }
 
     if (data === 'set_bal') {
@@ -343,9 +388,30 @@ bot.on('message', async (msg) => {
     }
     if (data === 'earn_check_sub') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + 0.1).toFixed(8) });
-      await logHistory(userId, 'earn', 0.1, 'USDT');
-      return bot.sendMessage(chatId, i18n.ru.earn_success.replace('{amount}', '0.1'), { ...getMainMenu(true), parse_mode: 'HTML' });
+      try {
+        const chatMember = await bot.getChatMember('@Solo_Men_Studio', userId);
+        if (chatMember.status === 'left' || chatMember.status === 'kicked') {
+          return bot.sendMessage(chatId, '❌ Ты не подписан на канал <b>Solo_Men Studio</b>!\n\nПодпишись и попробуй снова.', {
+            reply_markup: { inline_keyboard: [
+              [{ text: '📢 Подписаться', url: 'https://t.me/Solo_Men_Studio' }],
+              [{ text: '✅ Проверить еще раз', callback_data: 'earn_check_sub' }],
+              [{ text: i18n.ru.cancel, callback_data: 'back_to_menu' }]
+            ]}, parse_mode: 'HTML'
+          });
+        }
+        
+        const { data: hist } = await supabase.from('smaster_history').select('*').eq('user_id', userId).eq('type', 'earn').limit(1);
+        if (hist && hist.length > 0) {
+          return bot.sendMessage(chatId, '⚠️ Ты уже получал награду за это задание!', { ...getMainMenu(true), parse_mode: 'HTML' });
+        }
+        
+        await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + 0.1).toFixed(8) });
+        await logHistory(userId, 'earn', 0.1, 'USDT');
+        return bot.sendMessage(chatId, i18n.ru.earn_success.replace('{amount}', '0.1'), { ...getMainMenu(true), parse_mode: 'HTML' });
+      } catch (e) {
+        console.log('Earn error:', e.message);
+        return bot.sendMessage(chatId, '❌ Ошибка проверки. Убедись, что бот добавлен в админы канала <b>Solo_Men Studio</b>.', { ...getMainMenu(true), parse_mode: 'HTML' });
+      }
     }
 
     if (data === 'menu_about') {
@@ -404,53 +470,30 @@ bot.on('message', async (msg) => {
       return bot.sendMessage(chatId, i18n.ru.swap_ask_amount.replace('{currency}', from), { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
     }
 
-    if (data === 'menu_checks') {
-      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, i18n.ru.check_menu, {
-        reply_markup: { inline_keyboard: [
-          [{ text: i18n.ru.check_create, callback_data: 'check_create', style: 'success' }],
-          [{ text: i18n.ru.check_create_multi, callback_data: 'check_multi', style: 'success' }],
-          [{ text: i18n.ru.check_my, callback_data: 'check_my' }],
-          [{ text: i18n.ru.check_activate, callback_data: 'check_activate', style: 'primary' }],
-          [{ text: i18n.ru.cancel, callback_data: 'back_to_menu' }]
-        ]}, parse_mode: 'HTML'
-      });
-    }
-    if (data === 'check_create') { await bot.deleteMessage(chatId, query.message.message_id); states.set(userId, { type: 'check_create_amount' }); return bot.sendMessage(chatId, i18n.ru.check_ask_amount, { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' }); }
-    if (data === 'check_multi') { await bot.deleteMessage(chatId, query.message.message_id); states.set(userId, { type: 'check_multi_amount' }); return bot.sendMessage(chatId, i18n.ru.check_ask_multi_count, { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' }); }
-    if (data === 'check_activate') { await bot.deleteMessage(chatId, query.message.message_id); states.set(userId, { type: 'check_activate_code' }); return bot.sendMessage(chatId, i18n.ru.check_ask_code, { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' }); }
-    
-    if (data === 'check_my') {
-      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      const { data: checks } = await supabase.from('smaster_checks').select('*').eq('creator_id', userId).eq('status', 'active');
-      if (!checks || checks.length === 0) return bot.sendMessage(chatId, i18n.ru.check_list_empty, { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'menu_checks' }]] }, parse_mode: 'HTML' });
-      let list = '';
-      for (const c of checks) list += `• ID: <code>${c.id}</code> | Сумма: <code>${fmt(c.amount)} USDT</code>\n`;
-      return bot.sendMessage(chatId, i18n.ru.check_list.replace('{list}', list), { reply_markup: { inline_keyboard: [[{ text: '❌ Удалить все', callback_data: 'check_delete_all', style: 'danger' }], [{ text: i18n.ru.cancel, callback_data: 'menu_checks' }]] }, parse_mode: 'HTML' });
-    }
-    if (data === 'check_delete_all') {
-      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      const { data: checks } = await supabase.from('smaster_checks').select('*').eq('creator_id', userId).eq('status', 'active');
-      if (checks && checks.length > 0) {
-        let totalRefund = 0;
-        for (const c of checks) totalRefund += Number(c.amount);
-        await supabase.from('smaster_checks').update({ status: 'cancelled' }).eq('creator_id', userId).eq('status', 'active');
-        await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + totalRefund).toFixed(8) });
-        return bot.sendMessage(chatId, `✅ Все чеки удалены! Возвращено: <code>${fmt(totalRefund)} USDT</code>`, { ...getMainMenu(true), parse_mode: 'HTML' });
-      }
-    }
-
     if (data === 'menu_p2p') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       return bot.sendMessage(chatId, i18n.ru.p2p_menu, {
         reply_markup: { inline_keyboard: [
-          [{ text: '🛒 Купить USDT', callback_data: 'p2p_buy' }],
-          [{ text: '➕ Продать USDT', callback_data: 'p2p_create', style: 'success' }],
-          [{ text: '📢 Мои объявления', callback_data: 'p2p_my' }],
-          [{ text: i18n.ru.cancel, callback_data: 'back_to_menu' }]
+          [{ text: '💠 Открыть P2P Маркет', callback_data: 'p2p_open', style: 'primary' }],
+          [{ text: '📈 Купить', callback_data: 'p2p_buy' }, { text: '📉 Продать', callback_data: 'p2p_create' }],
+          [{ text: '🤝 Мои сделки', callback_data: 'p2p_my' }],
+          [{ text: '🏷 Создать объявление', callback_data: 'p2p_create' }],
+          [{ text: '⚙️ Оплата и валюта', callback_data: 'p2p_settings' }],
+          [{ text: '👤 Мой профиль', callback_data: 'set_profile' }],
+          [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]
         ]}, parse_mode: 'HTML'
       });
     }
+    
+    if (data === 'p2p_settings') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      return bot.sendMessage(chatId, '⚙️ <b>Оплата и валюта</b>\n\nВ разработке. Скоро вы сможете выбирать валюту P2P-сделок.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_p2p' }]] }, parse_mode: 'HTML' });
+    }
+    if (data === 'p2p_open') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      return bot.sendMessage(chatId, '💠 <b>Добро пожаловать в P2P Маркет!</b>\n\nЗдесь вы можете безопасно обменивать криптовалюту.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_p2p' }]] }, parse_mode: 'HTML' });
+    }
+    
     if (data === 'p2p_create') { await bot.deleteMessage(chatId, query.message.message_id); states.set(userId, { type: 'p2p_amount' }); return bot.sendMessage(chatId, '➕ Сколько USDT хочешь продать? Напиши число.', { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' }); }
     if (data === 'p2p_buy') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
@@ -495,11 +538,11 @@ bot.on('message', async (msg) => {
     if (data === 'p2p_my') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       const { data: ads } = await supabase.from('smaster_p2p_ads').select('*').eq('seller_id', userId).eq('status', 'active');
-      if (!ads || ads.length === 0) return bot.sendMessage(chatId, '📢 У тебя нет объявлений.', { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'menu_p2p' }]] }, parse_mode: 'HTML' });
+      if (!ads || ads.length === 0) return bot.sendMessage(chatId, '🤝 У тебя нет активных сделок.', { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'menu_p2p' }]] }, parse_mode: 'HTML' });
       for (const ad of ads) {
-        await bot.sendMessage(chatId, `📢 #${ad.id}\nUSDT: ${ad.amount}\nЦена: ${ad.price} ${ad.currency}`, { reply_markup: { inline_keyboard: [[{ text: '❌ Отменить', callback_data: `p2p_cancel_${ad.id}`, style: 'danger' }]] }, parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, `🤝 #${ad.id}\nUSDT: ${ad.amount}\nЦена: ${ad.price} ${ad.currency}`, { reply_markup: { inline_keyboard: [[{ text: '❌ Отменить', callback_data: `p2p_cancel_${ad.id}`, style: 'danger' }]] }, parse_mode: 'HTML' });
       }
-      return bot.sendMessage(chatId, '⬆️ Твои объявления.', { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'menu_p2p' }]] }, parse_mode: 'HTML' });
+      return bot.sendMessage(chatId, '⬆️ Твои активные объявления.', { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'menu_p2p' }]] }, parse_mode: 'HTML' });
     }
     if (data.startsWith('p2p_cancel_')) {
       const id = Number(data.split('_')[2]);
