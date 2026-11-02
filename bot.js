@@ -165,6 +165,21 @@ bot.onText(/^\/start/, async (msg) => {
   } catch (e) { console.log('start err:', e.message); }
 });
 
+// АДМИНКА
+bot.onText(/^\/admin/, async (msg) => {
+  if (String(msg.from.id) !== ADMIN_ID) return;
+  await bot.sendMessage(msg.chat.id, '👑 <b>Админ-панель SMaster</b>\n\nВыбери действие:', {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '👥 Кол-во юзеров', callback_data: 'adm_users' }],
+        [{ text: '💰 Выдать баланс', callback_data: 'adm_give' }],
+        [{ text: '📢 Рассылка', callback_data: 'adm_broadcast' }],
+        [{ text: '⬅️ В меню', callback_data: 'back_to_menu' }]
+      ]
+    }, parse_mode: 'HTML'
+  });
+});
+
 bot.on('message', async (msg) => {
   try {
     if (!msg.text || msg.text.startsWith('/')) return;
@@ -184,10 +199,46 @@ bot.on('message', async (msg) => {
     if (state.type === 'check_activate_code') return handleClaimCheck(msg, msg.text.trim(), w);
     if (state.type === 'set_wallet_ask') return handleSetWallet(msg, w);
     if (state.type === 'set_nick_input') {
-      if (msg.text.length > 20) return bot.sendMessage(chatId, '❌ Ник слишком длинный (макс 20 символов).');
+      if (msg.text.length > 20) return bot.sendMessage(msg.chat.id, '❌ Ник слишком длинный (макс 20 символов).');
       await updateWallet(userId, { custom_nick: msg.text });
       states.delete(userId);
-      return bot.sendMessage(chatId, i18n.ru.set_nick_success.replace('{nick}', msg.text), { ...getSettingsMenu(), parse_mode: 'HTML' });
+      return bot.sendMessage(msg.chat.id, i18n.ru.set_nick_success.replace('{nick}', msg.text), { ...getSettingsMenu(), parse_mode: 'HTML' });
+    }
+    if (state.type === 'adm_give_input') {
+      const parts = msg.text.trim().split(' ');
+      if (parts.length < 2) return bot.sendMessage(msg.chat.id, '❌ Формат: ID сумма');
+      const targetId = parts[0];
+      const amount = Number(parts[1].replace(',', '.'));
+      const targetW = await getWallet(targetId);
+      
+      if (!targetW) return bot.sendMessage(msg.chat.id, '❌ Юзер с таким ID не найден.');
+      if (!amount || amount <= 0) return bot.sendMessage(msg.chat.id, '❌ Неверная сумма.');
+      
+      await updateWallet(targetId, { balance_usdt: (Number(targetW.balance_usdt) + amount).toFixed(8) });
+      states.delete(userId);
+      
+      await bot.sendMessage(msg.chat.id, `✅ Успешно выдано <code>${amount} USDT</code> юзеру <code>${targetId}</code>.`, { ...getMainMenu(true), parse_mode: 'HTML' });
+      bot.sendMessage(targetId, `🎁 Тебе начислено <code>${amount} USDT</code> от администрации!`, { parse_mode: 'HTML' }).catch(() => {});
+      return;
+    }
+    if (state.type === 'adm_broadcast_input') {
+      states.delete(userId);
+      const text = msg.text;
+      await bot.sendMessage(msg.chat.id, '⏳ Начинаю рассылку...');
+      
+      const { data: users } = await supabase.from('smaster_wallets').select('user_id');
+      let success = 0, fail = 0;
+      
+      for (const u of users) {
+        try {
+          await bot.sendMessage(u.user_id, text, { parse_mode: 'HTML' });
+          success++;
+          await new Promise(r => setTimeout(r, 50));
+        } catch (e) { fail++; }
+      }
+      
+      await bot.sendMessage(msg.chat.id, `✅ Рассылка завершена!\n\nДошло: <b>${success}</b>\nЗаблокировали бота: <b>${fail}</b>`, { ...getMainMenu(true), parse_mode: 'HTML' });
+      return;
     }
   } catch (e) { console.log('msg err:', e.message); }
 });bot.on('callback_query', async (query) => {
@@ -265,17 +316,15 @@ bot.on('message', async (msg) => {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       if (Number(w.balance_usdt) < 0.1) return bot.sendMessage(chatId, '❌ Нужно минимум 0.1 USDT для спина!', { ...getMainMenu(true), parse_mode: 'HTML' });
       
-      // Забираем 0.1 USDT
       let newBalance = Number(w.balance_usdt) - 0.1;
       let winAmount = 0;
       
-      // Логика выигрыша (Дом всегда в плюсе)
       const roll = Math.random();
-      if (roll < 0.70) winAmount = 0; // 70% проигрыш
-      else if (roll < 0.85) winAmount = 0.05; // 15% - 0.05
-      else if (roll < 0.95) winAmount = 0.2; // 10% - 0.2
-      else if (roll < 0.99) winAmount = 1.0; // 4% - 1.0
-      else winAmount = 10.0; // 1% - ДЖЕКПОТ 10 USDT
+      if (roll < 0.70) winAmount = 0;
+      else if (roll < 0.85) winAmount = 0.05;
+      else if (roll < 0.95) winAmount = 0.2;
+      else if (roll < 0.99) winAmount = 1.0;
+      else winAmount = 10.0;
 
       newBalance += winAmount;
       
@@ -551,6 +600,29 @@ bot.on('message', async (msg) => {
       return bot.sendMessage(chatId, `✅ Объявление #${id} отменено.`, { reply_markup: { inline_keyboard: [[{ text: i18n.ru.cancel, callback_data: 'menu_p2p' }]] }, parse_mode: 'HTML' });
     }
 
+    // --- АДМИНКА КОЛБЭКИ ---
+    if (data === 'adm_users') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const { count } = await supabase.from('smaster_wallets').select('*', { count: 'exact', head: true });
+      return bot.sendMessage(chatId, `👥 Всего пользователей в боте: <b>${count || 0}</b>`, {
+        reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML'
+      });
+    }
+    if (data === 'adm_give') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      states.set(userId, { type: 'adm_give_input' });
+      return bot.sendMessage(chatId, '💰 Введи <b>ID</b> юзера и <b>сумму</b> через пробел (например: <code>8447147405 10</code>):', {
+        reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML'
+      });
+    }
+    if (data === 'adm_broadcast') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      states.set(userId, { type: 'adm_broadcast_input' });
+      return bot.sendMessage(chatId, '📢 Отправь текст для рассылки всем юзерам:', {
+        reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML'
+      });
+    }
+
   } catch (e) { console.log('cb err:', e.message); }
 });
 
@@ -750,20 +822,7 @@ async function handleSetWallet(msg, w) {
   await bot.sendMessage(chatId, i18n.ru.wallet_linked.replace('{addr}', addr), getSettingsMenu());
 }
 
-const app = express();// ============ АДМИН ПАНЕЛЬ ============
-bot.onText(/^\/admin/, async (msg) => {
-  if (String(msg.from.id) !== ADMIN_ID) return; // Если это не ты — игнор
-  await bot.sendMessage(msg.chat.id, '👑 <b>Админ-панель SMaster</b>\n\nВыбери действие:', {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '👥 Кол-во юзеров', callback_data: 'adm_users' }],
-        [{ text: '💰 Выдать баланс', callback_data: 'adm_give' }],
-        [{ text: '📢 Рассылка', callback_data: 'adm_broadcast' }],
-        [{ text: '⬅️ В меню', callback_data: 'back_to_menu' }]
-      ]
-    }, parse_mode: 'HTML'
-  });
-});
+const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.post('/cryptobot', async (req, res) => {
   try {
