@@ -19,7 +19,7 @@ const states = new Map();
 
 const i18n = {
   ru: {
-    welcome: '<b>Привет, {name}! 👋</b>\n\nДобро пожаловать в <b>SMaster</b> — твой премиальный крипто-кошелек.\n\n⚡️ Мгновенные переводы\n💎 Обмен по лучшему курсу\n🎲 Собственный P2P Маркет\n\n<i>Выбери действие в меню ниже:</i>',
+    welcome: '<b>Привет, {name}! 👋</b>\n\nДобро пожаловать в <b>SMaster</b> — твой премиальный крипто-кошелек.\n\n⚡️ Мгновенные переводы\n🎲 Собственный P2P Маркет\n🧾 Подарочные чеки\n\n<i>Выбери действие в меню ниже:</i>',
     balance_text: '👛 <b>Мой кошелёк</b>\n\n🪙 Tether: <code>{usdt}</code> USDT\n🪙 USD Coin: <code>{usdc}</code> USDC\n🪙 Gram: <code>{gram}</code> GRAM\n🪙 Solana: <code>{sol}</code> SOL\n🪙 TRON: <code>{trx}</code> TRX\n🪙 Ethereum: <code>{eth}</code> ETH\n🪙 Bitcoin: <code>{btc}</code> BTC\n🪙 Binance Coin: <code>{bnb}</code> BNB\n🪙 Dogecoin: <code>{doge}</code> DOGE\n🪙 Litecoin: <code>{ltc}</code> LTC\n🪙 Tether Gold: <code>{xaut}</code> XAUT\n🪙 GGT: <code>{ggt}</code> GGT\n\n≈ <b>{total} {curr}</b>\n\n<i>Чтобы настроить отображение, нажми на кнопку "Настройки"</i>',
     balance_empty: '👛 <b>Мой кошелёк</b>\n\n💰 <i>Баланс пуст.</i>\nПополни счет, чтобы начать!',
     deposit_ask: '💳 <b>Пополнение</b>\n\nВведи сумму в USDT (например, <code>5</code>):',
@@ -104,9 +104,6 @@ const i18n = {
 
 function getMainMenu(hasWallet, lang = 'ru') {
   if (!hasWallet) return { reply_markup: { inline_keyboard: [[{ text: '➕ Создать кошелек / Create Wallet', callback_data: 'create_wallet', style: 'success' }]] } };
-  const t = i18n[lang] || i18n.ru;
-  
-  // Убрали Перевести, Обмен и Вывод
   return {
     reply_markup: {
       inline_keyboard: [
@@ -229,12 +226,17 @@ bot.onText(/^\/admin/, async (msg) => {
     if (state.type === 'check_multi_amount') return handleCreateMultiCheck(msg, w, lang);
     if (state.type === 'check_activate_code') return handleClaimCheck(msg, msg.text.trim(), w);
     if (state.type === 'set_wallet_ask') return handleSetWallet(msg, w, lang);
+    if (state.type === 'p2p_amount') return handleP2pAmount(msg, lang);
+    if (state.type === 'p2p_currency') return handleP2pCurrency(msg, state, lang);
+    if (state.type === 'p2p_price') return handleP2pPrice(msg, state, lang);
+    
     if (state.type === 'set_nick_input') {
       if (msg.text.length > 20) return bot.sendMessage(msg.chat.id, '❌ Макс 20 символов.');
       await updateWallet(userId, { custom_nick: msg.text });
       states.delete(userId);
       return bot.sendMessage(msg.chat.id, t.set_nick_success.replace('{nick}', msg.text), { ...getSettingsMenu(lang), parse_mode: 'HTML' });
     }
+    
     if (state.type === 'adm_give_input') {
       const parts = msg.text.trim().split(' ');
       if (parts.length < 2) return bot.sendMessage(msg.chat.id, '❌ Формат: ID сумма');
@@ -252,6 +254,7 @@ bot.onText(/^\/admin/, async (msg) => {
       bot.sendMessage(targetId, `🎁 Начислено <code>${amount} USDT</code> от администрации!`, { parse_mode: 'HTML' }).catch(() => {});
       return;
     }
+    
     if (state.type === 'adm_broadcast_input') {
       states.delete(userId);
       const text = msg.text;
@@ -377,9 +380,7 @@ bot.on('callback_query', async (query) => {
     }
     if (data === 'set_bal_all') { await updateWallet(userId, { balance_display_mode: 'all' }); await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, '✅ OK', getSettingsMenu(lang)); }
     if (data === 'set_bal_zero') { await updateWallet(userId, { balance_display_mode: 'hide_zero' }); await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, '✅ OK', getSettingsMenu(lang)); }
-    if (data === 'set_bal_1') { await updateWallet(userId, { balance_display_mode: 'hide_1' }); await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, '✅ OK', getSettingsMenu(lang)); }
-
-    if (data === 'set_curr') {
+    if (data === 'set_bal_1') { await updateWallet(userId, { balance_display_mode: 'hide_1' }); await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, '✅ OK', getSettingsMenu(lang)); }    if (data === 'set_curr') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       const curr = w.bot_currency || 'USD';
       return bot.sendMessage(chatId, t.bot_currency, { reply_markup: { inline_keyboard: [
@@ -484,16 +485,57 @@ bot.on('callback_query', async (query) => {
       return;
     }
 
+    // ================= ЧЕКИ =================
+    if (data === 'menu_checks') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      return bot.sendMessage(chatId, t.check_menu, {
+        reply_markup: { inline_keyboard: [
+          [{ text: t.check_create, callback_data: 'check_create', style: 'success' }],
+          [{ text: t.check_create_multi, callback_data: 'check_multi', style: 'success' }],
+          [{ text: t.check_my, callback_data: 'check_my' }],
+          [{ text: t.check_activate, callback_data: 'check_activate', style: 'primary' }],
+          [{ text: t.cancel, callback_data: 'back_to_menu' }]
+        ]}, parse_mode: 'HTML'
+      });
+    }
+    if (data === 'check_create') { await bot.deleteMessage(chatId, query.message.message_id); states.set(userId, { type: 'check_create_amount' }); return bot.sendMessage(chatId, t.check_ask_amount, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' }); }
+    if (data === 'check_multi') { await bot.deleteMessage(chatId, query.message.message_id); states.set(userId, { type: 'check_multi_amount' }); return bot.sendMessage(chatId, t.check_ask_multi_count, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' }); }
+    if (data === 'check_activate') { await bot.deleteMessage(chatId, query.message.message_id); states.set(userId, { type: 'check_activate_code' }); return bot.sendMessage(chatId, t.check_ask_code, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' }); }
+    
+    if (data === 'check_my') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const { data: checks } = await supabase.from('smaster_checks').select('*').eq('creator_id', userId).eq('status', 'active');
+      if (!checks || checks.length === 0) return bot.sendMessage(chatId, t.check_list_empty, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'menu_checks' }]] }, parse_mode: 'HTML' });
+      let list = '';
+      for (const c of checks) list += `• ID: <code>${c.id}</code> | Сумма: <code>${fmt(c.amount)} USDT</code>\n`;
+      return bot.sendMessage(chatId, t.check_list.replace('{list}', list), { reply_markup: { inline_keyboard: [[{ text: '❌ Удалить все', callback_data: 'check_delete_all', style: 'danger' }], [{ text: t.cancel, callback_data: 'menu_checks' }]] }, parse_mode: 'HTML' });
+    }
+    if (data === 'check_delete_all') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const { data: checks } = await supabase.from('smaster_checks').select('*').eq('creator_id', userId).eq('status', 'active');
+      if (checks && checks.length > 0) {
+        let totalRefund = 0;
+        for (const c of checks) totalRefund += Number(c.amount);
+        await supabase.from('smaster_checks').update({ status: 'cancelled' }).eq('creator_id', userId).eq('status', 'active');
+        await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + totalRefund).toFixed(8) });
+        return bot.sendMessage(chatId, `✅ Все чеки удалены! Возвращено: <code>${fmt(totalRefund)} USDT</code>`, { ...getMainMenu(true, lang), parse_mode: 'HTML' });
+      }
+    }
+
+    // ================= P2P МАРКЕТ =================
     if (data === 'menu_p2p') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, t.p2p_menu, { reply_markup: { inline_keyboard: [
-        [{ text: '💠 P2P Market', callback_data: 'p2p_open', style: 'primary' }],
-        [{ text: '📈 Buy', callback_data: 'p2p_buy' }, { text: '📉 Sell', callback_data: 'p2p_create' }],
-        [{ text: '🤝 My deals', callback_data: 'p2p_my' }],
-        [{ text: '🏷 Create Ad', callback_data: 'p2p_create' }],
-        [{ text: '⚙️ Payment & Currency', callback_data: 'p2p_settings' }],
-        [{ text: t.cancel, callback_data: 'back_to_menu' }]
-      ]}, parse_mode: 'HTML' });
+      return bot.sendMessage(chatId, t.p2p_menu, {
+        reply_markup: { inline_keyboard: [
+          [{ text: '💠 P2P Market', callback_data: 'p2p_open', style: 'primary' }],
+          [{ text: '📈 Buy', callback_data: 'p2p_buy' }, { text: '📉 Sell', callback_data: 'p2p_create' }],
+          [{ text: '🤝 My deals', callback_data: 'p2p_my' }],
+          [{ text: '🏷 Create Ad', callback_data: 'p2p_create' }],
+          [{ text: '⚙️ Payment & Currency', callback_data: 'p2p_settings' }],
+          [{ text: '👤 Profile', callback_data: 'set_profile' }],
+          [{ text: t.cancel, callback_data: 'back_to_menu' }]
+        ]}, parse_mode: 'HTML'
+      });
     }
     if (data === 'p2p_settings') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, '⚙️ <b>Settings</b>\n\nIn development.', { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'menu_p2p' }]] }, parse_mode: 'HTML' }); }
     if (data === 'p2p_open') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, '💠 <b>Welcome to P2P Market!</b>', { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'menu_p2p' }]] }, parse_mode: 'HTML' }); }
@@ -554,6 +596,7 @@ bot.on('callback_query', async (query) => {
       return bot.sendMessage(chatId, `✅ Ad #${id} cancelled.`, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'menu_p2p' }]] }, parse_mode: 'HTML' });
     }
 
+    // --- АДМИНКА ---
     if (data === 'adm_users') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       const { count } = await supabase.from('smaster_wallets').select('*', { count: 'exact', head: true });
@@ -606,6 +649,102 @@ async function handleSetWallet(msg, w, lang) {
   await updateWallet(String(msg.from.id), { linked_ton_wallet: addr });
   states.delete(String(msg.from.id));
   await bot.sendMessage(chatId, t.wallet_linked.replace('{addr}', addr), getSettingsMenu(lang));
+}
+
+async function handleCreateCheckAmount(msg, w, lang) {
+  const chatId = msg.chat.id;
+  const amount = Number(msg.text.replace(',', '.'));
+  const t = i18n[lang];
+  if (!amount || amount <= 0) return bot.sendMessage(chatId, '❌ Enter number.', { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  if (Number(w.balance_usdt) < amount) { states.delete(String(msg.from.id)); return bot.sendMessage(chatId, '❌ Low balance!', { ...getMainMenu(true, lang), parse_mode: 'HTML' }); }
+  
+  await updateWallet(String(msg.from.id), { balance_usdt: (Number(w.balance_usdt) - amount).toFixed(8) });
+  const { data } = await supabase.from('smaster_checks').insert({ creator_id: String(msg.from.id), amount: amount, status: 'active' }).select();
+  states.delete(String(msg.from.id));
+  
+  const me = await bot.getMe();
+  const link = `https://t.me/${me.username}?start=check_${data[0].id}`;
+  
+  await bot.sendPhoto(chatId, 'https://placehold.co/600x350/1c1c1e/ffffff?text=SMaster+Check%0A%0A' + amount + '+USDT', {
+    caption: t.check_success.replace('{amount}', fmt(amount)).replace('{link}', link),
+    parse_mode: 'HTML',
+    ...getMainMenu(true, lang)
+  });
+}
+
+async function handleCreateMultiCheck(msg, w, lang) {
+  const chatId = msg.chat.id;
+  const parts = msg.text.trim().split(' ');
+  const t = i18n[lang];
+  if (parts.length < 2) return bot.sendMessage(chatId, '❌ Format: amount count.', { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  
+  const totalAmount = Number(parts[0].replace(',', '.'));
+  const count = parseInt(parts[1]);
+  if (!totalAmount || !count || totalAmount <= 0 || count <= 0 || count > 20) return bot.sendMessage(chatId, '❌ Invalid data (max 20 checks).', { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  if (Number(w.balance_usdt) < totalAmount) { states.delete(String(msg.from.id)); return bot.sendMessage(chatId, '❌ Low balance!', { ...getMainMenu(true, lang), parse_mode: 'HTML' }); }
+  
+  const amountPerCheck = totalAmount / count;
+  await updateWallet(String(msg.from.id), { balance_usdt: (Number(w.balance_usdt) - totalAmount).toFixed(8) });
+  
+  let links = '';
+  for (let i = 0; i < count; i++) {
+    const { data } = await supabase.from('smaster_checks').insert({ creator_id: String(msg.from.id), amount: amountPerCheck, status: 'active' }).select();
+    if (data) links += `https://t.me/${(await bot.getMe()).username}?start=check_${data[0].id}\n`;
+  }
+  states.delete(String(msg.from.id));
+  await bot.sendMessage(chatId, t.check_multi_success.replace('{count}', count).replace('{amount}', fmt(amountPerCheck)).replace('{links}', links), { ...getMainMenu(true, lang), parse_mode: 'HTML' });
+}
+
+async function handleClaimCheck(msg, checkId, w) {
+  const chatId = msg.chat.id;
+  const w2 = await getWallet(msg.from.id);
+  if (!w2) return bot.sendMessage(chatId, '🇷🇺 Сначала нажми /start!');
+  
+  const { data: arr } = await supabase.from('smaster_checks').select('*').eq('id', Number(checkId)).limit(1);
+  const check = arr && arr.length > 0 ? arr[0] : null;
+  if (!check || check.status !== 'active') return bot.sendMessage(chatId, '❌ Check not found.', { ...getMainMenu(true, 'ru'), parse_mode: 'HTML' });
+  if (String(check.creator_id) === String(msg.from.id)) return bot.sendMessage(chatId, '❌ You cannot activate your own check.', { ...getMainMenu(true, 'ru'), parse_mode: 'HTML' });
+  
+  await supabase.from('smaster_checks').update({ status: 'claimed', claimed_by: String(msg.from.id) }).eq('id', check.id);
+  await updateWallet(String(msg.from.id), { balance_usdt: (Number(w2.balance_usdt) + Number(check.amount)).toFixed(8) });
+  await logHistory(String(msg.from.id), 'dep', Number(check.amount), 'USDT');
+  await bot.sendMessage(chatId, `🎉 <b>Check activated!</b>\n\nBalance: <code>${fmt(check.amount)} USDT</code>!`, { ...getMainMenu(true, 'ru'), parse_mode: 'HTML' });
+}
+
+async function handleP2pAmount(msg, lang) {
+  const chatId = msg.chat.id;
+  const amount = Number(msg.text.replace(',', '.'));
+  const t = i18n[lang];
+  if (!amount || amount <= 0) return bot.sendMessage(chatId, '❌ Enter number.', { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  states.set(String(msg.from.id), { type: 'p2p_currency', amount });
+  await bot.sendMessage(chatId, 'Currency: TON or RUB', { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+}
+
+async function handleP2pCurrency(msg, state, lang) {
+  const chatId = msg.chat.id;
+  const cur = msg.text.toUpperCase();
+  const t = i18n[lang];
+  if (cur !== 'TON' && cur !== 'RUB') return bot.sendMessage(chatId, '❌ Type TON or RUB.', { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  states.set(String(msg.from.id), { ...state, type: 'p2p_price', currency: cur });
+  await bot.sendMessage(chatId, `Price per 1 USDT in ${cur}?`, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+}
+
+async function handleP2pPrice(msg, state, lang) {
+  const chatId = msg.chat.id;
+  const price = Number(msg.text.replace(',', '.'));
+  const t = i18n[lang];
+  if (!price || price <= 0) return bot.sendMessage(chatId, '❌ Enter price.', { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  
+  const w = await getWallet(String(msg.from.id));
+  if (Number(w.balance_usdt) < state.amount) {
+    states.delete(String(msg.from.id));
+    return bot.sendMessage(chatId, '❌ Low balance.', { ...getMainMenu(true, lang), parse_mode: 'HTML' });
+  }
+  
+  const { data, error } = await supabase.from('smaster_p2p_ads').insert({ seller_id: String(msg.from.id), seller_username: msg.from.username || null, amount: state.amount, price: price, currency: state.currency }).select();
+  states.delete(String(msg.from.id));
+  if (error) return bot.sendMessage(chatId, '❌ Error.', { ...getMainMenu(true, lang), parse_mode: 'HTML' });
+  await bot.sendMessage(chatId, `✅ Ad #${data[0].id} created!\n\nSelling: ${state.amount} USDT\nPrice: ${price} ${state.currency}`, { ...getMainMenu(true, lang), parse_mode: 'HTML' });
 }
 
 const app = express();
