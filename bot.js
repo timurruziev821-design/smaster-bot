@@ -1,12 +1,16 @@
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
+const { ethers } = require('ethers');
+const { WalletContractV4 } = require('@ton/ton');
+const { mnemonicNew, mnemonicToPrivateKey } = require('@ton/crypto');
 
 const BOT_TOKEN = process.env.SMASTER_BOT_TOKEN || process.env.BOT_TOKEN;
 const CRYPTOBOT_TOKEN = process.env.CRYPTOBOT_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const ADMIN_ID = String(process.env.ADMIN_ID || '');
+const MASTER_SEED = process.env.MASTER_SEED || 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 
 if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
   console.error('❌ ОШИБКА: Не заданы токены!');
@@ -22,7 +26,9 @@ const i18n = {
     welcome: '<b>Привет, {name}! 👋</b>\n\nДобро пожаловать в <b>SMaster</b> — твой премиальный крипто-кошелек.\n\n⚡️ Мгновенные переводы\n🎲 Собственный P2P Маркет\n🧾 Подарочные чеки\n\n<i>Выбери действие в меню ниже:</i>',
     balance_text: '👛 <b>Мой кошелёк</b>\n\n🪙 Tether: <code>{usdt}</code> USDT\n🪙 USD Coin: <code>{usdc}</code> USDC\n🪙 Gram: <code>{gram}</code> GRAM\n🪙 Solana: <code>{sol}</code> SOL\n🪙 TRON: <code>{trx}</code> TRX\n🪙 Ethereum: <code>{eth}</code> ETH\n🪙 Bitcoin: <code>{btc}</code> BTC\n🪙 Binance Coin: <code>{bnb}</code> BNB\n🪙 Dogecoin: <code>{doge}</code> DOGE\n🪙 Litecoin: <code>{ltc}</code> LTC\n🪙 Tether Gold: <code>{xaut}</code> XAUT\n🪙 GGT: <code>{ggt}</code> GGT\n\n≈ <b>{total} {curr}</b>\n\n<i>Чтобы настроить отображение, нажми на кнопку "Настройки"</i>',
     balance_empty: '👛 <b>Мой кошелёк</b>\n\n💰 <i>Баланс пуст.</i>\nПополни счет, чтобы начать!',
-    deposit_ask: '💳 <b>Пополнение</b>\n\nВведи сумму в USDT (например, <code>5</code>):',
+    deposit_menu: '💳 <b>Выбери валюту для пополнения:</b>\n\n<i>Отправляй монеты ТОЛЬКО на свой личный адрес!</i>',
+    deposit_ton: '💎 <b>Пополнение TON</b>\n\nТвой личный адрес для пополнения:\n<code>{addr}</code>\n\n⚠️ <i>Отправляй только TON (The Open Network) на этот адрес. Другие монеты сгорят!</i>',
+    deposit_eth: '💵 <b>Пополнение USDT (ERC20/BEP20)</b>\n\nТвой личный адрес:\n<code>{addr}</code>\n\n⚠️ <i>Отправляй только USDT в сети Ethereum или BSC на этот адрес.</i>',
     p2p_menu: '💠 <b>Здесь вы можете купить или продать криптовалюту переводом на карту или электронный кошелёк.</b>\n\n<a href="https://t.me/Solo_Men_Studio">Смотреть видеоинструкцию ></a>',
     check_menu: '🧾 <b>Чеки SMaster</b>\n\nСоздай чек и отправь ссылку другу. Он сможет забрать крипту себе.',
     settings: '⚙️ <b>Настройки</b>\n\nУправляй своим аккаунтом и приложением:',
@@ -38,7 +44,7 @@ const i18n = {
     wallet_linked: '✅ Кошелёк <code>{addr}</code> привязан!',
     about: 'ℹ️ <b>О SMaster</b>\n\nSMaster — это экосистема для управления криптоактивами внутри Telegram.\n\n🚀 <b>Наши фишки:</b>\n• Мгновенные переводы без границ\n• P2P Маркет без комиссий\n• Подарочные чеки\n\n👨‍💻 <b>Основатель:</b> @Solo_Men\n💡 <i>Мы делаем крипту простой и доступной.</i>',
     support: '👨‍💻 <b>Поддержка</b>\n\nВозникли вопросы? Пиши нашему менеджеру: @TonRocketSupportBot',
-    help_text: '🤖 <b>Помощь по SMaster</b>\n\nДоступные команды:\n/start — Перезапустить бота\n/help — Показать это сообщение\n/admin — Админ-панель (только для создателя)\n\n<b>Основные разделы:</b>\n• 👛 <b>Кошелёк</b> — твой баланс.\n• 💳 <b>Пополнить</b> — пополнение через CryptoBot.\n• 🎲 <b>P2P Маркет</b> — купля/продажа USDT за TON.\n• 🧾 <b>Чеки</b> — создание подарочных чеков.\n• 🎁 <b>Рефералка</b> — приглашай друзей.\n\nЕсли нужна помощь — пиши @TonRocketSupportBot',
+    help_text: '🤖 <b>Помощь по SMaster</b>\n\nДоступные команды:\n/start — Перезапустить бота\n/help — Показать это сообщение\n/admin — Админ-панель (только для создателя)\n\n<b>Основные разделы:</b>\n• 👛 <b>Кошелёк</b> — твой баланс.\n• 💳 <b>Пополнить</b> — пополнение на твой личный адрес.\n• 🎲 <b>P2P Маркет</b> — купля/продажа USDT за TON.\n• 🧾 <b>Чеки</b> — создание подарочных чеков.\n• 🎁 <b>Рефералка</b> — приглашай друзей.\n\nЕсли нужна помощь — пиши @TonRocketSupportBot',
     cancel: '⬅️ Назад в меню',
     check_create: '➕ Создать чек', check_create_multi: '🎁 Мульти-чек', check_activate: '🎁 Активировать', check_my: '📜 Мои чеки',
     check_ask_amount: '🧾 Введи сумму в USDT для чека:',
@@ -63,7 +69,9 @@ const i18n = {
     welcome: '<b>Hello, {name}! 👋</b>\n\nWelcome to <b>SMaster</b> — your premium crypto wallet.\n\n⚡️ Instant transfers\n🎲 Own P2P Market\n🧾 Gift checks\n\n<i>Choose an action below:</i>',
     balance_text: '👛 <b>My Wallet</b>\n\n🪙 Tether: <code>{usdt}</code> USDT\n🪙 USD Coin: <code>{usdc}</code> USDC\n🪙 Gram: <code>{gram}</code> GRAM\n🪙 Solana: <code>{sol}</code> SOL\n🪙 TRON: <code>{trx}</code> TRX\n🪙 Ethereum: <code>{eth}</code> ETH\n🪙 Bitcoin: <code>{btc}</code> BTC\n🪙 Binance Coin: <code>{bnb}</code> BNB\n🪙 Dogecoin: <code>{doge}</code> DOGE\n🪙 Litecoin: <code>{ltc}</code> LTC\n🪙 Tether Gold: <code>{xaut}</code> XAUT\n🪙 GGT: <code>{ggt}</code> GGT\n\n≈ <b>{total} {curr}</b>\n\n<i>To customize display, click "Settings"</i>',
     balance_empty: '👛 <b>My Wallet</b>\n\n💰 <i>Balance is empty.</i>\nDeposit to start!',
-    deposit_ask: '💳 <b>Deposit</b>\n\nEnter USDT amount (e.g., <code>5</code>):',
+    deposit_menu: '💳 <b>Choose currency to deposit:</b>\n\n<i>Send coins ONLY to your personal address!</i>',
+    deposit_ton: '💎 <b>TON Deposit</b>\n\nYour personal address:\n<code>{addr}</code>\n\n⚠️ <i>Send only TON (The Open Network) to this address.</i>',
+    deposit_eth: '💵 <b>USDT Deposit (ERC20/BEP20)</b>\n\nYour personal address:\n<code>{addr}</code>\n\n⚠️ <i>Send only USDT on Ethereum or BSC network.</i>',
     p2p_menu: '💠 <b>Here you can buy or sell crypto via card or e-wallet.</b>\n\n<a href="https://t.me/Solo_Men_Studio">Watch video guide ></a>',
     check_menu: '🧾 <b>SMaster Checks</b>\n\nCreate a check and send the link to a friend.',
     settings: '⚙️ <b>Settings</b>\n\nManage your account and app:',
@@ -79,7 +87,7 @@ const i18n = {
     wallet_linked: '✅ Wallet <code>{addr}</code> linked!',
     about: 'ℹ️ <b>About SMaster</b>\n\nSMaster is an ecosystem for managing crypto inside Telegram.\n\n🚀 <b>Features:</b>\n• Instant transfers\n• P2P Market\n• Gift checks\n\n👨‍💻 <b>Founder:</b> @Solo_Men',
     support: '👨‍💻 <b>Support</b>\n\nQuestions? Write to: @TonRocketSupportBot',
-    help_text: '🤖 <b>SMaster Help</b>\n\nCommands:\n/start — Restart bot\n/help — Show this message\n/admin — Admin panel (creator only)\n\n<b>Sections:</b>\n• 👛 <b>Wallet</b> — your balance.\n• 💳 <b>Deposit</b> — via CryptoBot.\n• 🎲 <b>P2P Market</b> — trade USDT for TON.\n• 🧾 <b>Checks</b> — gift crypto.\n• 🎁 <b>Referral</b> — invite friends.\n\nNeed help? @TonRocketSupportBot',
+    help_text: '🤖 <b>SMaster Help</b>\n\nCommands:\n/start — Restart bot\n/help — Show this message\n/admin — Admin panel (creator only)\n\n<b>Sections:</b>\n• 👛 <b>Wallet</b> — your balance.\n• 💳 <b>Deposit</b> — to your personal address.\n• 🎲 <b>P2P Market</b> — trade USDT for TON.\n• 🧾 <b>Checks</b> — gift crypto.\n• 🎁 <b>Referral</b> — invite friends.\n\nNeed help? @TonRocketSupportBot',
     cancel: '⬅️ Back to menu',
     check_create: '➕ Create Check', check_create_multi: '🎁 Multi-Check', check_activate: '🎁 Activate', check_my: '📜 My Checks',
     check_ask_amount: '🧾 Enter USDT amount:',
@@ -139,14 +147,28 @@ async function getWallet(userId) {
     const { data } = await supabase.from('smaster_wallets').select('*').eq('user_id', String(userId)).limit(1);
     return data && data.length > 0 ? data[0] : null;
   } catch (e) { return null; }
-}
-
-async function createWallet(user, referrer_id = null) {
+}async function createWallet(user, referrer_id = null) {
   try {
+    // Генерация TON
+    const tonMnemonic = await mnemonicNew();
+    const tonKey = await mnemonicToPrivateKey(tonMnemonic);
+    const tonWallet = WalletContractV4.create({ publicKey: tonKey.publicKey, workchain: 0 });
+    const tonAddress = tonWallet.address.toString({ bounceable: false });
+
+    // Генерация EVM (ETH/BNB/USDT)
+    const hdNode = ethers.HDNodeWallet.fromPhrase(MASTER_SEED);
+    const ethWallet = hdNode.derivePath(`m/44'/60'/0'/0/${user.id % 100000}`);
+    const ethAddress = ethWallet.address;
+
+    // Сохраняем в базу
     const { data } = await supabase.from('smaster_wallets').insert({
-      user_id: String(user.id), username: user.username || null, 
+      user_id: String(user.id), 
+      username: user.username || null, 
       balance_usdt: 0, balance_ton: 0, balance_usdc: 0, balance_gram: 0, balance_sol: 0, balance_trx: 0, 
       balance_eth: 0, balance_btc: 0, balance_bnb: 0, balance_doge: 0, balance_ltc: 0, balance_xaut: 0, balance_ggt: 0,
+      ton_deposit_address: tonAddress,
+      eth_deposit_address: ethAddress,
+      ton_private_mnemonic: tonMnemonic.join(' '), // Сохраняем для вывода в будущем
       language: 'ru', bot_currency: 'USD', referrer_id: referrer_id ? String(referrer_id) : null
     }).select();
     
@@ -155,7 +177,10 @@ async function createWallet(user, referrer_id = null) {
       if (ref) await updateWallet(referrer_id, { ref_count: (Number(ref.ref_count) || 0) + 1 });
     }
     return data && data.length > 0 ? { data: data[0] } : { error: 'Fail' };
-  } catch (e) { return { error: e.message }; }
+  } catch (e) { 
+    console.log('Wallet Gen Error:', e.message);
+    return { error: e.message }; 
+  }
 }
 
 async function updateWallet(userId, patch) { 
@@ -221,7 +246,6 @@ bot.onText(/^\/admin/, async (msg) => {
     const lang = w ? (w.language || 'ru') : 'ru';
     const t = i18n[lang];
 
-    if (state.type === 'deposit') return handleDepositInput(msg, lang);
     if (state.type === 'check_create_amount') return handleCreateCheckAmount(msg, w, lang);
     if (state.type === 'check_multi_amount') return handleCreateMultiCheck(msg, w, lang);
     if (state.type === 'check_activate_code') return handleClaimCheck(msg, msg.text.trim(), w);
@@ -328,6 +352,31 @@ bot.on('callback_query', async (query) => {
       return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '💳 Пополнить / Deposit', callback_data: 'menu_deposit', style: 'success' }, { text: '🔄 Обновить / Refresh', callback_data: 'menu_balance' }], [{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
     }
 
+    // === ПОПОЛНЕНИЕ С АДРЕСАМИ ===
+    if (data === 'menu_deposit') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      return bot.sendMessage(chatId, t.deposit_menu, {
+        reply_markup: { inline_keyboard: [
+          [{ text: '💎 TON', callback_data: 'dep_ton' }, { text: '💵 USDT (ERC20/BEP20)', callback_data: 'dep_eth' }],
+          [{ text: t.cancel, callback_data: 'back_to_menu' }]
+        ]}, parse_mode: 'HTML'
+      });
+    }
+
+    if (data === 'dep_ton') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      return bot.sendMessage(chatId, t.deposit_ton.replace('{addr}', w.ton_deposit_address || 'Ошибка генерации'), {
+        reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML'
+      });
+    }
+
+    if (data === 'dep_eth') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      return bot.sendMessage(chatId, t.deposit_eth.replace('{addr}', w.eth_deposit_address || 'Ошибка генерации'), {
+        reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML'
+      });
+    }
+
     if (data === 'set_profile') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       const d = w.created_at ? new Date(w.created_at).toLocaleDateString() : 'Unknown';
@@ -380,7 +429,9 @@ bot.on('callback_query', async (query) => {
     }
     if (data === 'set_bal_all') { await updateWallet(userId, { balance_display_mode: 'all' }); await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, '✅ OK', getSettingsMenu(lang)); }
     if (data === 'set_bal_zero') { await updateWallet(userId, { balance_display_mode: 'hide_zero' }); await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, '✅ OK', getSettingsMenu(lang)); }
-    if (data === 'set_bal_1') { await updateWallet(userId, { balance_display_mode: 'hide_1' }); await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, '✅ OK', getSettingsMenu(lang)); }    if (data === 'set_curr') {
+    if (data === 'set_bal_1') { await updateWallet(userId, { balance_display_mode: 'hide_1' }); await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, '✅ OK', getSettingsMenu(lang)); }
+
+    if (data === 'set_curr') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       const curr = w.bot_currency || 'USD';
       return bot.sendMessage(chatId, t.bot_currency, { reply_markup: { inline_keyboard: [
@@ -464,12 +515,6 @@ bot.on('callback_query', async (query) => {
       return bot.sendMessage(chatId, t.about, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
     }
 
-    if (data === 'menu_deposit') {
-      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      states.set(userId, { type: 'deposit' });
-      return bot.sendMessage(chatId, t.deposit_ask, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-    }
-
     if (data === 'menu_rates') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       const temp = await bot.sendMessage(chatId, '⏳...');
@@ -483,9 +528,7 @@ bot.on('callback_query', async (query) => {
         await bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
       } catch (e) { await bot.sendMessage(chatId, '❌ Error', { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' }); }
       return;
-    }
-
-    // ================= ЧЕКИ =================
+    }    // ================= ЧЕКИ =================
     if (data === 'menu_checks') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       return bot.sendMessage(chatId, t.check_menu, {
@@ -615,26 +658,6 @@ bot.on('callback_query', async (query) => {
 
   } catch (e) { console.log('cb err:', e.message); }
 });
-
-async function handleDepositInput(msg, lang) {
-  const chatId = msg.chat.id;
-  const amount = Number(msg.text.replace(',', '.'));
-  const t = i18n[lang];
-  if (!amount || amount <= 0) return bot.sendMessage(chatId, '❌ Enter number.', { reply_markup: { inline_keyboard: [[{ text: t.cancel, callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  states.delete(String(msg.from.id));
-  const temp = await bot.sendMessage(chatId, '⏳...');
-  try {
-    const res = await fetch('https://pay.crypt.bot/api/createInvoice', {
-      method: 'POST',
-      headers: { 'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ asset: 'USDT', amount: String(amount), description: `Deposit #${msg.from.id}`, payload: String(msg.from.id), allow_comments: false, allow_anonymous: false, expires_in: 3600 })
-    });
-    const data = await res.json();
-    await bot.deleteMessage(chatId, temp.message_id).catch(() => {});
-    if (!data.ok) return bot.sendMessage(chatId, '❌ CryptoBot Error.', { ...getMainMenu(true, lang), parse_mode: 'HTML' });
-    await bot.sendMessage(chatId, `💳 <b>Invoice for ${amount} USDT!</b>\n\nPay: ${data.result.bot_invoice_url}`, { ...getMainMenu(true, lang), parse_mode: 'HTML' });
-  } catch (e) { await bot.deleteMessage(chatId, temp.message_id).catch(() => {}); await bot.sendMessage(chatId, '❌ Error.', { ...getMainMenu(true, lang), parse_mode: 'HTML' }); }
-}
 
 async function handleSetWallet(msg, w, lang) {
   const chatId = msg.chat.id;
