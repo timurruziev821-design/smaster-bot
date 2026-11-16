@@ -7,6 +7,7 @@ const { mnemonicToPrivateKey } = require('@ton/crypto');
 const crypto = require('crypto');
 const helmet = require('helmet');
 
+// ГЛОБАЛЬНЫЙ ПЕРЕХВАТ ОШИБОК
 process.on('uncaughtException', (err) => console.error('КРИТ. ОШИБКА:', err.message));
 process.on('unhandledRejection', (err) => console.error('ОШИБКА ПРОМИСА:', err.message));
 
@@ -27,7 +28,11 @@ async function getWallet(userId) {
 }
 
 async function updateWallet(userId, patch) {
-  try { await supabase.from('smaster_wallets').update(patch).eq('user_id', Number(userId)); } catch (e) {}
+  try { await supabase.from('smaster_wallets').update(patch).eq('user_id', Number(userId)); } catch (e) { console.error(e); }
+}
+
+async function logHistory(userId, type, amount, currency) {
+  try { await supabase.from('smaster_history').insert({ user_id: Number(userId), type, amount, currency }); } catch (e) {}
 }
 
 async function createWallet(user) {
@@ -51,6 +56,7 @@ async function createWallet(user) {
   } catch (e) { return { error: e.message }; }
 }
 
+// СТИЛЬНОЕ МЕНЮ
 function getMainMenu(hasWallet) {
   if (!hasWallet) return { reply_markup: { inline_keyboard: [[{ text: '➕ Создать кошелек', callback_data: 'create_wallet', style: 'success' }]] } };
   return {
@@ -66,8 +72,10 @@ function getMainMenu(hasWallet) {
     }
   };
 }bot.onText(/^\/start/, async (msg) => {
-  const w = await getWallet(msg.from.id);
-  await bot.sendMessage(msg.chat.id, w ? 'Добро пожаловать!' : 'Создай кошелек кнопкой ниже:', { ...getMainMenu(!!w) });
+  try {
+    const w = await getWallet(msg.from.id);
+    await bot.sendMessage(msg.chat.id, w ? '👋 Добро пожаловать в <b>SMaster</b>!' : '👇 Нажми кнопку, чтобы создать кошелек:', { ...getMainMenu(!!w), parse_mode: 'HTML' });
+  } catch (e) { console.error(e); }
 });
 
 bot.on('callback_query', async (query) => {
@@ -83,80 +91,52 @@ bot.on('callback_query', async (query) => {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       const res = await createWallet(query.from);
       if (res.error) return bot.sendMessage(chatId, `❌ Ошибка: ${res.error}`);
-      return bot.sendMessage(chatId, '✅ Кошелек создан!', { ...getMainMenu(true) });
+      return bot.sendMessage(chatId, '✅ Кошелек успешно создан!', { ...getMainMenu(true) });
     }
-    if (!w) return bot.sendMessage(chatId, 'Нажми /start');
+    if (!w) return bot.sendMessage(chatId, '❌ Нажми /start');
 
     if (data === 'back_to_menu') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, 'Меню:', { ...getMainMenu(true) });
+      return bot.sendMessage(chatId, 'Главное меню:', { ...getMainMenu(true) });
     }
 
-    // --- СЧЕТА (Инвойсы) ---
+    // --- СЧЕТА (ИНВОЙСЫ) ---
     if (data === 'menu_invoices') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      const text = `📄 <b>Счета</b>\n\nМожно создать:\n• Одноразовый - счёт, который можно оплатить один раз\n• Мульти-счёт - счёт, который смогут оплатить несколько раз\n\nОплачивать счета можно через SMaster, либо напрямую по блокчейн-адресу.`;
-      return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [
-        [{ text: '💎 USDT', callback_data: 'inv_currency_USDT' }, { text: '🟡 XROCK', callback_data: 'inv_currency_XROCK' }, { text: '🔵 USDC', callback_data: 'inv_currency_USDC' }],
-        [{ text: '⚪ GRAM', callback_data: 'inv_currency_GRAM' }, { text: '🔴 TRX', callback_data: 'inv_currency_TRX' }, { text: '⚫ SOL', callback_data: 'inv_currency_SOL' }],
-        [{ text: '🟠 BTC', callback_data: 'inv_currency_BTC' }, { text: '🔷 ETH', callback_data: 'inv_currency_ETH' }, { text: '🟡 BNB', callback_data: 'inv_currency_BNB' }],
-        [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]
-      ]}, parse_mode: 'HTML' });
+      const text = `📄 <b>Счета</b>\n\nСоздавай одноразовые счета для приема оплаты.\n\nОплачивать можно через SMaster или по ссылке.`;
+      return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '➕ Создать счет', callback_data: 'inv_create' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
     }
-    
-    if (data.startsWith('inv_currency_')) {
-      const currency = data.split('_')[2];
+    if (data === 'inv_create') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      states.set(userId, { type: 'inv_amount', currency });
-      return bot.sendMessage(chatId, `Выберите сумму счёта в ${currency}:\n\n1`, { reply_markup: { inline_keyboard: [[{ text: '1', callback_data: 'inv_set_1' }, { text: '2', callback_data: 'inv_set_2' }], [{ text: '⬅️ Назад', callback_data: 'menu_invoices' }]] } });
-    }
-    
-    if (data.startsWith('inv_set_')) {
-      const amount = Number(data.split('_')[2]);
-      const state = states.get(userId);
-      if (!state || state.type !== 'inv_amount') return;
-      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      
-      const { data: inv, error } = await supabase.from('smaster_invoices').insert({ creator_id: Number(userId), amount, currency: state.currency }).select();
-      if (error) throw error;
-      states.delete(userId);
-      
-      const link = `https://t.me/${(await bot.getMe()).username}?start=invoice_${inv[0].id}`;
-      return bot.sendMessage(chatId, `📄 Счет на ${amount} ${state.currency} создан!\n\nСсылка:\n<code>${link}</code>`, { ...getMainMenu(true), parse_mode: 'HTML' });
+      states.set(userId, { type: 'inv_amount' });
+      return bot.sendMessage(chatId, 'Введи сумму в USDT для счета:');
     }
 
     // --- ЧЕКИ ---
     if (data === 'menu_checks') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      const text = `🧾 <b>Чеки</b>\n\nЧеки позволяют отправлять криптовалюту прямо в сообщениях.\n\n• Персональный чек - для отправки монет одному пользователю\n• Мульти-чек - для отправки монет нескольким пользователям с возможностью добавить условие подписки\n• Rocket-чек - улучшенный мульти-чек с наградой за распространение`;
+      const text = `🧾 <b>Чеки</b>\n\nОтправляй криптовалюту прямо в сообщениях!\n\n• Персональный — одному юзеру.\n• Мульти-чек — нескольким юзерам.\n\n<i>Создай свой чек:</i>`;
       return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [
-        [{ text: 'Персональный', callback_data: 'check_type_personal' }, { text: 'Мульти-чек', callback_data: 'check_type_multi' }],
-        [{ text: '🚀 Rocket-чек', callback_data: 'check_type_rocket' }],
-        [{ text: '📋 Доска чеков', callback_data: 'check_board' }],
+        [{ text: '🎁 Создать чек', callback_data: 'check_create' }],
+        [{ text: '🎫 Активировать', callback_data: 'check_activate' }],
         [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]
       ]}, parse_mode: 'HTML' });
     }
-    
-    if (data.startsWith('check_type_')) {
-      const type = data.split('_')[2];
+    if (data === 'check_create') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      states.set(userId, { type: 'check_amount', check_type: type });
-      return bot.sendMessage(chatId, `Введи сумму USDT для ${type === 'personal' ? 'персонального' : type === 'multi' ? 'мульти' : 'Rocket'}-чека:`);
+      states.set(userId, { type: 'check_amount' });
+      return bot.sendMessage(chatId, 'Введи сумму в USDT (например: 5.5):');
     }
-    
-    if (data === 'check_board') {
+    if (data === 'check_activate') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      const { data: checks } = await supabase.from('smaster_checks').select('*').eq('status', 'active').order('created_at', { ascending: false }).limit(10);
-      let text = '📋 <b>Доска чеков (последние 10):</b>\n\n';
-      if (!checks || checks.length === 0) text += 'Пусто.';
-      else for (const c of checks) text += `• Чек #${c.id} на ${c.amount} USDT (Тип: ${c.check_type})\n`;
-      return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_checks' }]] }, parse_mode: 'HTML' });
+      states.set(userId, { type: 'check_activate_id' });
+      return bot.sendMessage(chatId, 'Введи ID чека или ссылку:');
     }
 
-    // --- ОСТАЛЬНЫЕ КНОПКИ ---
+    // --- БАЛАНС ---
     if (data === 'menu_balance') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, `👛 <b>Баланс</b>\n\nUSDT: <code>${Number(w.balance_usdt).toFixed(2)}</code>\nTON: <code>${Number(w.balance_ton).toFixed(2)}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+      return bot.sendMessage(chatId, `👛 <b>Баланс</b>\n\n💵 USDT: <code>${Number(w.balance_usdt).toFixed(2)}</code>\n💎 TON: <code>${Number(w.balance_ton).toFixed(2)}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
     }
     if (data === 'menu_deposit') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
@@ -164,15 +144,69 @@ bot.on('callback_query', async (query) => {
     }
     if (data === 'dep_ton') { await bot.deleteMessage(chatId, query.message.message_id).catch(() => {}); return bot.sendMessage(chatId, `💎 <b>TON Адрес:</b>\n<code>${w.ton_deposit_address}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
     if (data === 'dep_eth') { await bot.deleteMessage(chatId, query.message.message_id).catch(() => {}); return bot.sendMessage(chatId, `💵 <b>ETH Адрес:</b>\n<code>${w.eth_deposit_address}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
-    
+
+    // --- P2P ---
     if (data === 'menu_p2p') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       return bot.sendMessage(chatId, '🎲 <b>P2P Маркет</b>', { reply_markup: { inline_keyboard: [[{ text: '🛒 Купить USDT', callback_data: 'p2p_buy' }], [{ text: '➕ Продать USDT', callback_data: 'p2p_create' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
     }
-    
-  } catch (e) { 
-    console.error(e); 
-    bot.sendMessage(chatId, `❌ Ошибка сервера: ${e.message}`);
+    if (data === 'p2p_create') { await bot.deleteMessage(chatId, query.message.message_id).catch(() => {}); states.set(userId, { type: 'p2p_amount' }); return bot.sendMessage(chatId, 'Сколько USDT продаешь?'); }
+    if (data === 'p2p_buy') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const { data: ads } = await supabase.from('smaster_p2p_ads').select('*').eq('status', 'active').neq('seller_id', userId).limit(10);
+      if (!ads || ads.length === 0) return bot.sendMessage(chatId, '🛒 Нет активных объявлений.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_p2p' }]] } });
+      const buttons = ads.map(ad => [{ text: `#${ad.id} · ${ad.amount} USDT · ${ad.price} ${ad.currency}`, callback_data: `p2p_view_${ad.id}` }]);
+      return bot.sendMessage(chatId, '🛒 Выбери объявление:', { reply_markup: { inline_keyboard: buttons } });
+    }
+    if (data.startsWith('p2p_view_')) {
+      const id = Number(data.split('_')[2]);
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const { data: arr } = await supabase.from('smaster_p2p_ads').select('*').eq('id', id).limit(1);
+      const ad = arr && arr.length > 0 ? arr[0] : null;
+      const total = Number(ad.amount) * Number(ad.price);
+      return bot.sendMessage(chatId, `📢 <b>Объявление #${ad.id}</b>\n\nUSDT: ${ad.amount}\nЦена: ${ad.price} ${ad.currency}\nИтого: ${total}`, { reply_markup: { inline_keyboard: [[{ text: '✅ Купить', callback_data: `p2p_buy_${ad.id}`, style: 'success' }], [{ text: '⬅️ Назад', callback_data: 'p2p_buy' }]] }, parse_mode: 'HTML' });
+    }
+    if (data.startsWith('p2p_buy_')) {
+      const id = Number(data.split('_')[2]);
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const { data: arr } = await supabase.from('smaster_p2p_ads').select('*').eq('id', id).limit(1);
+      const ad = arr && arr.length > 0 ? arr[0] : null;
+      const seller = await getWallet(ad.seller_id);
+      const amount = Number(ad.amount);
+      const total = amount * Number(ad.price);
+      if (Number(w.balance_ton) < total) return bot.sendMessage(chatId, '❌ Мало TON.');
+      await updateWallet(userId, { balance_ton: (Number(w.balance_ton) - total).toFixed(8), balance_usdt: (Number(w.balance_usdt) + amount).toFixed(8) });
+      await updateWallet(ad.seller_id, { balance_ton: (Number(seller.balance_ton) + total).toFixed(8), balance_usdt: (Number(seller.balance_usdt) - amount).toFixed(8) });
+      await supabase.from('smaster_p2p_ads').update({ status: 'completed', buyer_id: userId }).eq('id', ad.id);
+      return bot.sendMessage(chatId, `✅ Сделка завершена! +${amount} USDT`, { ...getMainMenu(true) });
+    }
+
+    // --- РЕФЕРАЛКА / НАСТРОЙКИ ---
+    if (data === 'menu_ref') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const link = `https://t.me/${(await bot.getMe()).username}?start=ref_${userId}`;
+      return bot.sendMessage(chatId, `🎁 Твоя реферальная ссылка:\n<code>${link}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+    }
+    if (data === 'menu_settings') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      return bot.sendMessage(chatId, '⚙️ <b>Настройки</b>', { reply_markup: { inline_keyboard: [[{ text: 'История', callback_data: 'set_history' }, { text: 'Поддержка', callback_data: 'set_support' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+    }
+    if (data === 'set_history') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      const { data: hist } = await supabase.from('smaster_history').select('*').eq('user_id', Number(userId)).order('created_at', { ascending: false }).limit(5);
+      let text = '📜 <b>История:</b>\n\n';
+      if (!hist || hist.length === 0) text += 'Пусто.';
+      else for (const h of hist) text += `• ${h.type}: ${h.amount} ${h.currency}\n`;
+      return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_settings' }]] }, parse_mode: 'HTML' });
+    }
+    if (data === 'set_support') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      return bot.sendMessage(chatId, '🚨 Поддержка: @TonRocketSupportBot', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_settings' }]] } });
+    }
+
+  } catch (e) {
+    console.error(e);
+    bot.sendMessage(chatId, `❌ Произошла ошибка: ${e.message}`);
   }
 });bot.on('message', async (msg) => {
   const userId = String(msg.from.id);
@@ -182,44 +216,73 @@ bot.on('callback_query', async (query) => {
   try {
     if (state.type === 'inv_amount') {
       const amount = Number(msg.text.replace(',', '.'));
-      if (!amount || amount <= 0) return;
+      if (!amount || amount <= 0) {
+        states.delete(userId);
+        return bot.sendMessage(msg.chat.id, '❌ Введи корректное число.');
+      }
       
-      const { data: inv, error } = await supabase.from('smaster_invoices').insert({ creator_id: Number(userId), amount, currency: state.currency }).select();
+      const { data: inv, error } = await supabase.from('smaster_invoices').insert({ creator_id: Number(userId), amount, currency: 'USDT' }).select();
       if (error) throw error;
       states.delete(userId);
       
       const link = `https://t.me/${(await bot.getMe()).username}?start=invoice_${inv[0].id}`;
-      return bot.sendMessage(msg.chat.id, `📄 Счет на ${amount} ${state.currency} создан!\n\nСсылка:\n<code>${link}</code>`, { ...getMainMenu(true), parse_mode: 'HTML' });
+      return bot.sendMessage(msg.chat.id, `📄 <b>Счет на ${amount} USDT создан!</b>\n\nСсылка для оплаты:\n<code>${link}</code>`, { ...getMainMenu(true), parse_mode: 'HTML' });
     }
 
     if (state.type === 'check_amount') {
       const amount = Number(msg.text.replace(',', '.'));
+      if (!amount || amount <= 0) {
+        states.delete(userId);
+        return bot.sendMessage(msg.chat.id, '❌ Введи корректное число.');
+      }
+      
       const w = await getWallet(userId);
-      if (Number(w.balance_usdt) < amount) { states.delete(userId); return bot.sendMessage(msg.chat.id, '❌ Мало USDT.'); }
+      if (Number(w.balance_usdt) < amount) {
+        states.delete(userId);
+        return bot.sendMessage(msg.chat.id, '❌ Недостаточно средств.');
+      }
       
       await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) - amount).toFixed(8) });
-      const { data: check, error } = await supabase.from('smaster_checks').insert({ creator_id: Number(userId), amount, check_type: state.check_type }).select();
+      const { data: check, error } = await supabase.from('smaster_checks').insert({ creator_id: Number(userId), amount, limit_activations: 1 }).select();
       if (error) throw error;
       states.delete(userId);
       
       const link = `https://t.me/${(await bot.getMe()).username}?start=check_${check[0].id}`;
-      const imageUrl = `https://placehold.co/600x400/0f0715/ff007f/png?text=SMaster+Check%0A%0A${amount}+USDT%0A%0AТип:+${state.check_type}`;
+      const imageUrl = `https://placehold.co/800x450/0f0715/ff007f/png?text=SMaster+Check%0A%0A${amount}+USDT%0A%0A+%F0%9F%8E%81+Click+to+Claim`;
       
       return bot.sendPhoto(msg.chat.id, imageUrl, { 
-        caption: `🎁 <b>Чек на ${amount} USDT создан!</b>\n\nСсылка:\n<code>${link}</code>`, 
+        caption: `🎁 <b>Чек на ${amount} USDT создан!</b>\n\nОтправь эту ссылку другу, чтобы он забрал деньги:\n<code>${link}</code>`, 
         parse_mode: 'HTML', 
         reply_markup: { inline_keyboard: [[{ text: '📤 Поделиться', url: `https://t.me/share/url?url=${link}` }]] } 
       });
     }
     
-    // P2P
+    if (state.type === 'check_activate_id') {
+      states.delete(userId);
+      const checkId = msg.text.trim().split('_').pop();
+      const { data: arr } = await supabase.from('smaster_checks').select('*').eq('id', Number(checkId)).limit(1);
+      const check = arr && arr.length > 0 ? arr[0] : null;
+      
+      if (!check || check.status !== 'active') return bot.sendMessage(msg.chat.id, '❌ Чек не найден или уже активирован.');
+      if (String(check.creator_id) === userId) return bot.sendMessage(msg.chat.id, '❌ Нельзя активировать свой же чек.');
+      
+      await supabase.from('smaster_checks').update({ status: 'claimed', claimed_by: Number(userId) }).eq('id', check.id);
+      const w = await getWallet(userId);
+      await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + Number(check.amount)).toFixed(8) });
+      
+      return bot.sendMessage(msg.chat.id, `🎉 <b>Чек активирован!</b>\nТы получил +${check.amount} USDT`, { ...getMainMenu(true), parse_mode: 'HTML' });
+    }
+
+    // P2P ВВОД
     if (state.type === 'p2p_amount') {
-      states.set(userId, { ...state, type: 'p2p_currency', amount: Number(msg.text.replace(',', '.')) });
-      return bot.sendMessage(msg.chat.id, 'Валюта: TON или RUB');
+      const amount = Number(msg.text.replace(',', '.'));
+      if (!amount || amount <= 0) return bot.sendMessage(msg.chat.id, '❌ Введи число.');
+      states.set(userId, { ...state, type: 'p2p_currency', amount });
+      return bot.sendMessage(msg.chat.id, 'Валюта (TON или RUB):');
     }
     if (state.type === 'p2p_currency') {
       states.set(userId, { ...state, type: 'p2p_price', currency: msg.text.toUpperCase() });
-      return bot.sendMessage(msg.chat.id, `Цена за 1 USDT?`);
+      return bot.sendMessage(msg.chat.id, `Цена за 1 USDT в ${msg.text.toUpperCase()}?`);
     }
     if (state.type === 'p2p_price') {
       const price = Number(msg.text.replace(',', '.'));
@@ -229,58 +292,68 @@ bot.on('callback_query', async (query) => {
       states.delete(userId);
       return bot.sendMessage(msg.chat.id, `✅ Объявление создано!`, { ...getMainMenu(true) });
     }
-  } catch (e) { 
+
+  } catch (e) {
     console.error(e);
     bot.sendMessage(msg.chat.id, `❌ Ошибка: ${e.message}`);
   }
 });
 
-// Обработка Deep Links (активация чеков и счетов)
+// ПОДТВЕРЖДЕНИЕ ОПЛАТЫ СЧЕТА (Deep Links)
 bot.onText(/^\/start (.+)/, async (msg, match) => {
   const param = match[1];
   const userId = String(msg.from.id);
   
   try {
-    if (param.startsWith('check_')) {
-      const id = param.split('_')[1];
-      const { data: arr } = await supabase.from('smaster_checks').select('*').eq('id', Number(id)).limit(1);
-      const check = arr && arr.length > 0 ? arr[0] : null;
-      
-      if (!check || check.status !== 'active') return bot.sendMessage(msg.chat.id, '❌ Чек не найден.');
-      if (String(check.creator_id) === userId) return bot.sendMessage(msg.chat.id, '❌ Нельзя активировать свой чек.');
-      
-      await supabase.from('smaster_checks').update({ status: 'claimed', claimed_by: Number(userId) }).eq('id', check.id);
-      const w = await getWallet(userId);
-      await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + Number(check.amount)).toFixed(8) });
-      
-      return bot.sendMessage(msg.chat.id, `🎉 <b>Чек активирован!</b>\n+${check.amount} USDT`, { ...getMainMenu(true), parse_mode: 'HTML' });
-    }
-    
     if (param.startsWith('invoice_')) {
       const id = param.split('_')[1];
       const { data: arr } = await supabase.from('smaster_invoices').select('*').eq('id', Number(id)).limit(1);
       const inv = arr && arr.length > 0 ? arr[0] : null;
       
       if (!inv || inv.status === 'paid') return bot.sendMessage(msg.chat.id, '❌ Счет не найден или уже оплачен.');
+      if (String(inv.creator_id) === userId) return bot.sendMessage(msg.chat.id, '❌ Нельзя оплатить свой же счет.');
       
       const w = await getWallet(userId);
-      const balanceKey = `balance_${inv.currency.toLowerCase()}`;
+      if (Number(w.balance_usdt) < Number(inv.amount)) return bot.sendMessage(msg.chat.id, '❌ Недостаточно USDT для оплаты.');
       
-      if (Number(w[balanceKey] || 0) < Number(inv.amount)) {
-        return bot.sendMessage(msg.chat.id, `❌ Недостаточно ${inv.currency} для оплаты счета.`);
-      }
-      
-      await updateWallet(userId, { [balanceKey]: (Number(w[balanceKey]) - Number(inv.amount)).toFixed(8) });
-      const creator = await getWallet(inv.creator_id);
-      if (creator) await updateWallet(inv.creator_id, { [balanceKey]: (Number(creator[balanceKey] || 0) + Number(inv.amount)).toFixed(8) });
-      
-      await supabase.from('smaster_invoices').update({ status: 'paid', paid_by: Number(userId) }).eq('id', inv.id);
-      return bot.sendMessage(msg.chat.id, `✅ <b>Счет оплачен!</b>\nСписано: ${inv.amount} ${inv.currency}`, { ...getMainMenu(true), parse_mode: 'HTML' });
+      // СПРАШИВАЕМ ПОДТВЕРЖДЕНИЕ
+      return bot.sendMessage(msg.chat.id, `📄 <b>Счет на оплату</b>\n\nСумма: <code>${inv.amount} USDT</code>\n\nВы уверены, что хотите оплатить этот счет?`, {
+        reply_markup: { inline_keyboard: [[{ text: '✅ Да, оплатить', callback_data: `confirm_inv_${inv.id}`, style: 'success' }], [{ text: '❌ Отмена', callback_data: 'back_to_menu', style: 'danger' }]] },
+        parse_mode: 'HTML'
+      });
     }
   } catch (e) { console.error(e); }
 });
 
-// --- СЕРВЕР И MINI APP ---
+// ОБРАБОТКА КНОПКИ ПОДТВЕРЖДЕНИЯ ОПЛАТЫ
+bot.on('callback_query', async (query) => {
+  if (!query.data.startsWith('confirm_inv_')) return;
+  
+  const chatId = query.message.chat.id;
+  const userId = query.from.id;
+  const invId = Number(query.data.split('_')[2]);
+  await bot.answerCallbackQuery(query.id).catch(() => {});
+  
+  try {
+    const { data: arr } = await supabase.from('smaster_invoices').select('*').eq('id', invId).limit(1);
+    const inv = arr && arr.length > 0 ? arr[0] : null;
+    if (!inv || inv.status === 'paid') return bot.sendMessage(chatId, '❌ Счет уже оплачен.');
+    
+    const w = await getWallet(userId);
+    if (Number(w.balance_usdt) < Number(inv.amount)) return bot.sendMessage(chatId, '❌ Недостаточно USDT.');
+    
+    await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) - Number(inv.amount)).toFixed(8) });
+    const creator = await getWallet(inv.creator_id);
+    if (creator) await updateWallet(inv.creator_id, { balance_usdt: (Number(creator.balance_usdt) + Number(inv.amount)).toFixed(8) });
+    
+    await supabase.from('smaster_invoices').update({ status: 'paid', paid_by: Number(userId) }).eq('id', inv.id);
+    
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+    return bot.sendMessage(chatId, `✅ <b>Счет успешно оплачен!</b>\nСписано: ${inv.amount} USDT`, { ...getMainMenu(true), parse_mode: 'HTML' });
+  } catch (e) { console.error(e); }
+});
+
+// --- СЕРВЕР И MINI APP (Улучшенный дизайн) ---
 const app = express();
 app.use(helmet());
 app.use(express.json());
@@ -295,7 +368,7 @@ app.get('/app', (req, res) => {
   res.send(`
     <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><title>SMaster</title><style>
     :root { --bg-dark: #0f0715; --bg-card: #1c102b; --accent-pink: #ff007f; --text-main: #ffffff; --text-muted: #9e8bb5; }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: sans-serif; user-select: none; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; user-select: none; }
     body { background-color: var(--bg-dark); color: var(--text-main); padding: 20px; padding-bottom: 80px; }
     .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
     .logo { font-size: 26px; font-weight: 900; background: linear-gradient(90deg, var(--accent-pink), #8a2be2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
