@@ -8,38 +8,20 @@ const crypto = require('crypto');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 
-// 1. ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
 const requiredEnv = ['BOT_TOKEN', 'SUPABASE_URL', 'SUPABASE_KEY', 'ADMIN_ID', 'MASTER_SEED'];
-for (const env of requiredEnv) {
-  if (!process.env[env]) {
-    console.error(`❌ КРИТИЧЕСКАЯ ОШИБКА: Отсутствует переменная ${env}`);
-    process.exit(1);
-  }
-}
+for (const env of requiredEnv) { if (!process.env[env]) { console.error(`❌ Нет ${env}`); process.exit(1); } }
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const states = new Map();
 const ADMIN_ID = String(process.env.ADMIN_ID);
 const MASTER_SEED = process.env.MASTER_SEED;
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-const states = new Map();
-
-// 2. ФУНКЦИЯ ЭКРАНИРОВАНИЯ (ЗАЩИТА ОТ XSS)
 function escapeHtml(text) {
   if (!text) return '';
-  return String(text).replace(/[&<>"']/g, function(m) {
-    if (m === '&') return '&amp;';
-    if (m === '<') return '&lt;';
-    if (m === '>') return '&gt;';
-    if (m === '"') return '&quot;';
-    if (m === "'") return '&#039;';
-  });
+  return String(text).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 }
 
-// 3. ХЕЛПЕРЫ БАЗЫ ДАННЫХ
 async function getWallet(userId) {
   const { data } = await supabase.from('smaster_wallets').select('*').eq('user_id', Number(userId)).limit(1);
   return data && data.length > 0 ? data[0] : null;
@@ -49,19 +31,14 @@ async function updateWallet(userId, patch) {
   await supabase.from('smaster_wallets').update(patch).eq('user_id', Number(userId));
 }
 
-async function logHistory(userId, type, amount, currency) {
-  await supabase.from('smaster_history').insert({ user_id: Number(userId), type, amount, currency });
-}
-
-// 4. ГЕНЕРАЦИЯ HD-КОШЕЛЬКОВ
 async function createWallet(user, referrer_id = null) {
   try {
-    // ETH (HD)
+    // ETH HD Generation
     const hdNode = ethers.HDNodeWallet.fromPhrase(MASTER_SEED);
     const ethWallet = hdNode.derivePath(`m/44'/60'/0'/0/${user.id % 100000}`);
     const ethAddress = ethWallet.address;
 
-    // TON (HD)
+    // TON HD Generation (no errors)
     const tonMnemonic = MASTER_SEED.split(' ');
     const tonKey = await mnemonicToPrivateKey(tonMnemonic);
     const userSeed = tonKey.secretKey.toString('hex') + String(user.id);
@@ -86,15 +63,14 @@ async function createWallet(user, referrer_id = null) {
   }
 }
 
-// 5. МЕНЮ КОМАНД
 bot.setMyCommands([
   { command: '/start', description: 'Запустить бота' },
   { command: '/app', description: 'Открыть Mini App' },
   { command: '/help', description: 'Помощь' },
   { command: '/admin', description: 'Админ-панель' }
-]);// 6. ГЛАВНОЕ МЕНЮ
-function getMainMenu(hasWallet) {
-  if (!hasWallet) return { reply_markup: { inline_keyboard: [[{ text: '➕ Создать кошелек', callback_data: 'create_wallet', style: 'success' }]] } };
+]);
+
+function getMainMenu() {
   return {
     reply_markup: {
       inline_keyboard: [
@@ -107,12 +83,10 @@ function getMainMenu(hasWallet) {
   };
 }
 
-// 7. СТАРТ
 bot.onText(/^\/start/, async (msg) => {
   try {
     const chatId = msg.chat.id;
     let w = await getWallet(msg.from.id);
-    
     if (!w) {
       const textParts = msg.text.split(' ');
       let ref = null;
@@ -120,12 +94,10 @@ bot.onText(/^\/start/, async (msg) => {
       const res = await createWallet(msg.from, ref);
       w = res.data;
     }
-
-    await bot.sendMessage(chatId, `<b>Привет, ${escapeHtml(msg.from.first_name)}! 👋</b>\n\nДобро пожаловать в SMaster.`, { ...getMainMenu(true), parse_mode: 'HTML' });
+    await bot.sendMessage(chatId, `<b>Привет, ${escapeHtml(msg.from.first_name)}! 👋</b>\n\nДобро пожаловать в SMaster.`, { ...getMainMenu(), parse_mode: 'HTML' });
   } catch (e) { console.error(e); }
 });
 
-// 8. КНОПКИ
 bot.on('callback_query', async (query) => {
   const data = query.data;
   const chatId = query.message.chat.id;
@@ -136,7 +108,7 @@ bot.on('callback_query', async (query) => {
 
   if (data === 'back_to_menu') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-    return bot.sendMessage(chatId, 'Главное меню:', { ...getMainMenu(!!w), parse_mode: 'HTML' });
+    return bot.sendMessage(chatId, 'Главное меню:', { ...getMainMenu(), parse_mode: 'HTML' });
   }
 
   if (data === 'menu_balance') {
@@ -150,40 +122,33 @@ bot.on('callback_query', async (query) => {
     return bot.sendMessage(chatId, '💳 Выбери валюту:', { reply_markup: { inline_keyboard: [[{ text: '💎 TON', callback_data: 'dep_ton' }, { text: '💵 USDT', callback_data: 'dep_eth' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
   }
 
-  if (data === 'dep_ton') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💎 <b>TON Адрес:</b>\n<code>${w.ton_deposit_address}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
-  if (data === 'dep_eth') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💵 <b>ETH Адрес:</b>\n<code>${w.eth_deposit_address}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
+  if (data === 'dep_ton') { 
+    await bot.deleteMessage(chatId, query.message.message_id); 
+    return bot.sendMessage(chatId, `💎 <b>TON Адрес:</b>\n<code>${w.ton_deposit_address || 'Ошибка'}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); 
+  }
+  if (data === 'dep_eth') { 
+    await bot.deleteMessage(chatId, query.message.message_id); 
+    return bot.sendMessage(chatId, `💵 <b>ETH Адрес:</b>\n<code>${w.eth_deposit_address || 'Ошибка'}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); 
+  }
 
   if (data === 'open_app') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-    const appUrl = process.env.APP_URL || 'https://твой-сайт.onrender.com/app';
+    const appUrl = process.env.APP_URL || 'https://smaster-bot-e5zp.onrender.com/app';
     return bot.sendMessage(chatId, '🚀 Открываю Mini App...', { reply_markup: { inline_keyboard: [[{ text: '📱 Открыть', web_app: { url: appUrl } }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
   }
-});// 9. EXPRESS СЕРВЕР С ЗАЩИТОЙ
-const app = express();
-
-// Helmet для защиты заголовков
+});const app = express();
 app.use(helmet());
-// Лимит на запросы (100 в минуту)
 app.use(rateLimit({ windowMs: 60 * 1000, max: 100 }));
-// Ограничение размера JSON
 app.use(express.json({ limit: '10kb' }));
 
-// API для Mini App
 app.get('/api/user/:id', async (req, res) => {
   try {
-    // В реальности тут нужно проверять initData от Telegram, но для простоты проверим ID
     const w = await getWallet(req.params.id);
     if (!w) return res.status(404).json({ error: 'Not found' });
-    res.json({ 
-      balance_usdt: w.balance_usdt, 
-      balance_ton: w.balance_ton,
-      ton_deposit_address: w.ton_deposit_address, 
-      eth_deposit_address: w.eth_deposit_address 
-    });
+    res.json({ balance_usdt: w.balance_usdt, balance_ton: w.balance_ton, ton_deposit_address: w.ton_deposit_address, eth_deposit_address: w.eth_deposit_address });
   } catch (e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// MINI APP
 app.get('/app', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -194,64 +159,99 @@ app.get('/app', (req, res) => {
       <script src="https://telegram.org/js/telegram-web-app.js"></script>
       <title>SMaster</title>
       <style>
-        :root { --bg-dark: #0f0715; --bg-card: #1c102b; --accent-pink: #ff007f; --text-main: #ffffff; }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: sans-serif; user-select: none; }
+        :root { --bg-dark: #0f0715; --bg-card: #1c102b; --accent-pink: #ff007f; --text-main: #ffffff; --text-muted: #9e8bb5; }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; user-select: none; }
         body { background-color: var(--bg-dark); color: var(--text-main); padding: 20px; padding-bottom: 80px; }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
-        .logo { font-size: 26px; font-weight: 900; color: var(--accent-pink); }
-        .card { background: var(--bg-card); border-radius: 20px; padding: 20px; margin-bottom: 16px; }
-        .balance { font-size: 40px; font-weight: 800; color: #00ff88; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-        .btn { background: rgba(255,0,127,0.1); border: 1px solid var(--accent-pink); color: white; padding: 16px; border-radius: 16px; text-align: center; font-weight: 600; cursor: pointer; }
-        .btn:active { transform: scale(0.95); }
-        .addr { background: #09040d; padding: 14px; border-radius: 12px; font-family: monospace; font-size: 13px; word-break: break-all; color: var(--accent-pink); text-align: center; margin-top: 8px; }
-        .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: var(--bg-card); display: flex; justify-content: space-around; padding: 16px; border-top: 1px solid rgba(255,0,127,0.1); }
-        .nav-item { color: #888; font-size: 12px; text-align: center; }
+        .logo { font-size: 26px; font-weight: 900; background: linear-gradient(90deg, var(--accent-pink), #8a2be2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -0.5px; }
+        .card { background: var(--bg-card); border-radius: 24px; padding: 24px; margin-bottom: 16px; border: 1px solid rgba(255,0,127,0.1); box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        .balance-total { font-size: 40px; font-weight: 800; margin-bottom: 8px; }
+        .balance-total span { color: #00ff88; }
+        .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+        .action-btn { background: var(--bg-card); border: 1px solid rgba(255,0,127,0.1); border-radius: 18px; padding: 16px 8px; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; cursor: pointer; }
+        .action-btn:active { transform: scale(0.95); background: #2a1840; border-color: var(--accent-pink); }
+        .action-btn .icon { font-size: 24px; }
+        .action-btn .label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+        .section-title { font-size: 18px; font-weight: 700; margin-bottom: 16px; }
+        .coin-list { background: var(--bg-card); border-radius: 20px; padding: 8px; margin-bottom: 24px; }
+        .coin-item { display: flex; justify-content: space-between; align-items: center; padding: 16px; border-bottom: 1px solid rgba(255,255,255,0.05); cursor: pointer; border-radius: 12px; }
+        .coin-item:last-child { border-bottom: none; }
+        .coin-info { display: flex; align-items: center; gap: 12px; }
+        .coin-icon { width: 36px; height: 36px; border-radius: 50%; background: rgba(255,255,255,0.1); display: flex; justify-content: center; align-items: center; font-size: 18px; }
+        .coin-name { font-weight: 600; font-size: 16px; }
+        .coin-ticker { font-size: 12px; color: var(--text-muted); }
+        .coin-amount { text-align: right; }
+        .coin-amount .amount { font-weight: 700; font-size: 16px; }
+        .address-card { background: var(--bg-card); border-radius: 20px; padding: 20px; margin-bottom: 16px; }
+        .address-title { font-size: 14px; color: var(--text-muted); margin-bottom: 12px; display: flex; justify-content: space-between; }
+        .address-box { background: #09040d; padding: 14px; border-radius: 12px; font-family: monospace; font-size: 13px; word-break: break-all; color: var(--accent-pink); text-align: center; border: 1px solid rgba(255,0,127,0.2); }
+        .copy-btn { background: rgba(255,0,127,0.1); color: var(--accent-pink); border: none; padding: 12px; border-radius: 12px; width: 100%; margin-top: 12px; font-weight: 600; cursor: pointer; }
+        .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(28, 16, 43, 0.95); display: flex; justify-content: space-around; padding: 16px 0; border-top: 1px solid rgba(255,0,127,0.1); backdrop-filter: blur(10px); z-index: 100; }
+        .nav-item { display: flex; flex-direction: column; align-items: center; gap: 4px; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+        .nav-item .nav-icon { font-size: 22px; }
         .nav-item.active { color: var(--accent-pink); }
-        .screen { display: none; }
+        .screen { display: none; animation: fadeIn 0.3s; }
         .screen.active { display: block; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
       </style>
     </head>
     <body>
       <div id="screen-main" class="screen active">
-        <div class="header"><div class="logo">SMaster</div></div>
+        <div class="header"><div class="logo">SMaster</div><div style="width: 44px; height: 44px; border-radius: 50%; background: linear-gradient(135deg, var(--accent-pink), #8a2be2); display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 18px;" id="user-avatar">S</div></div>
         <div class="card">
-          <div style="color:#888; font-size:14px;">Общий баланс</div>
-          <div class="balance" id="total-balance">0.00 USDT</div>
+          <div style="font-size: 14px; color: var(--text-muted); margin-bottom: 8px;">Общий баланс</div>
+          <div class="balance-total"><span id="total-balance">0.00</span> <span style="font-size: 24px; color: white;">USDT</span></div>
         </div>
         <div class="grid">
-          <div class="btn" onclick="showScreen('screen-deposit')">💳 Пополнить</div>
-          <div class="btn" onclick="alert('В разработке')">📤 Вывести</div>
-          <div class="btn" onclick="alert('В разработке')">🎲 P2P</div>
-          <div class="btn" onclick="alert('В разработке')">🧾 Чеки</div>
+          <div class="action-btn" onclick="showScreen('screen-deposit')"><div class="icon">💳</div><div class="label">Пополнить</div></div>
+          <div class="action-btn" onclick="showScreen('screen-p2p')"><div class="icon">🎲</div><div class="label">P2P</div></div>
+          <div class="action-btn" onclick="showScreen('screen-checks')"><div class="icon">🧾</div><div class="label">Чеки</div></div>
+          <div class="action-btn" onclick="alert('Скоро!')"><div class="icon">📤</div><div class="label">Вывести</div></div>
+        </div>
+        <div class="section-title">Активы</div>
+        <div class="coin-list">
+          <div class="coin-item"><div class="coin-info"><div class="coin-icon" style="background:#26a17b;">💵</div><div><div class="coin-name">Tether</div><div class="coin-ticker">USDT</div></div></div><div class="coin-amount"><div class="amount" id="coin-usdt">0.00</div></div></div>
+          <div class="coin-item"><div class="coin-info"><div class="coin-icon" style="background:#0098ea;">💎</div><div><div class="coin-name">Toncoin</div><div class="coin-ticker">TON</div></div></div><div class="coin-amount"><div class="amount" id="coin-ton">0.00</div></div></div>
         </div>
       </div>
+
       <div id="screen-deposit" class="screen">
-        <div class="header"><div class="logo" style="font-size:20px;">Пополнение</div><div style="cursor:pointer;" onclick="showScreen('screen-main')">✕</div></div>
-        <div class="card"><div style="color:#888;">TON Адрес</div><div class="addr" id="dep-ton">Загрузка...</div></div>
-        <div class="card"><div style="color:#888;">ETH Адрес</div><div class="addr" id="dep-eth">Загрузка...</div></div>
+        <div class="header" style="margin-bottom:16px;"><div class="logo" style="font-size:20px;">Пополнение</div><div style="color:var(--accent-pink);cursor:pointer;" onclick="showScreen('screen-main')">✕</div></div>
+        <div class="address-card"><div class="address-title"><span>TON Адрес</span><span style="color:#00ff88;">Сеть: TON</span></div><div class="address-box" id="dep-ton">Загрузка...</div><button class="copy-btn" onclick="copyText('dep-ton')">Копировать</button></div>
+        <div class="address-card"><div class="address-title"><span>ETH/BSC Адрес</span><span style="color:#8a2be2;">Сеть: ERC20/BEP20</span></div><div class="address-box" id="dep-eth">Загрузка...</div><button class="copy-btn" onclick="copyText('dep-eth')">Копировать</button></div>
       </div>
+
+      <div id="screen-p2p" class="screen">
+        <div class="header" style="margin-bottom:16px;"><div class="logo" style="font-size:20px;">P2P Маркет</div><div style="color:var(--accent-pink);cursor:pointer;" onclick="showScreen('screen-main')">✕</div></div>
+        <div class="card" style="text-align:center; padding:40px 20px;"><div style="font-size:40px; margin-bottom:16px;">🎲</div><div style="font-size:16px; color:white; margin-bottom:8px;">P2P Маркет</div><div style="color:var(--text-muted); font-size:14px; margin-bottom:20px;">Скоро здесь можно будет покупать и продавать USDT за TON или RUB.</div></div>
+      </div>
+
+      <div id="screen-checks" class="screen">
+        <div class="header" style="margin-bottom:16px;"><div class="logo" style="font-size:20px;">Чеки</div><div style="color:var(--accent-pink);cursor:pointer;" onclick="showScreen('screen-main')">✕</div></div>
+        <div class="card" style="text-align:center; padding:40px 20px;"><div style="font-size:40px; margin-bottom:16px;">🧾</div><div style="font-size:16px; color:white; margin-bottom:8px;">Подарочные чеки</div><div style="color:var(--text-muted); font-size:14px; margin-bottom:20px;">Создавай чеки и отправляй друзьям.</div></div>
+      </div>
+
       <div class="bottom-nav">
-        <div class="nav-item active" onclick="showScreen('screen-main')">🏠 Главная</div>
-        <div class="nav-item" onclick="alert('В разработке')">🎲 P2P</div>
-        <div class="nav-item" onclick="alert('В разработке')">👤 Профиль</div>
+        <div class="nav-item active" onclick="showScreen('screen-main')"><div class="nav-icon">🏠</div>Главная</div>
+        <div class="nav-item" onclick="showScreen('screen-p2p')"><div class="nav-icon">🎲</div>P2P</div>
+        <div class="nav-item" onclick="showScreen('screen-checks')"><div class="nav-icon">🧾</div>Чеки</div>
       </div>
+
       <script>
         const tg = window.Telegram.WebApp; tg.expand(); tg.setHeaderColor('#0f0715');
+        if (tg.initDataUnsafe && tg.initDataUnsafe.user) document.getElementById('user-avatar').innerText = tg.initDataUnsafe.user.first_name.charAt(0);
         async function loadData() { 
-          try { 
-            const userId = tg.initDataUnsafe?.user?.id; 
-            if (!userId) return; 
-            const res = await fetch('/api/user/' + userId); 
-            const data = await res.json(); 
-            if (data) { 
-              document.getElementById('total-balance').innerText = Number(data.balance_usdt || 0).toFixed(2) + ' USDT'; 
-              document.getElementById('dep-ton').innerText = data.ton_deposit_address || 'Ошибка'; 
-              document.getElementById('dep-eth').innerText = data.eth_deposit_address || 'Ошибка'; 
-            } 
-          } catch (e) { console.error(e); } 
+          try { const userId = tg.initDataUnsafe?.user?.id; if (!userId) return; const res = await fetch('/api/user/' + userId); const data = await res.json(); 
+          if (data) { 
+            document.getElementById('total-balance').innerText = Number(data.balance_usdt || 0).toFixed(2); 
+            document.getElementById('coin-usdt').innerText = Number(data.balance_usdt || 0).toFixed(2); 
+            document.getElementById('coin-ton').innerText = Number(data.balance_ton || 0).toFixed(2); 
+            document.getElementById('dep-ton').innerText = data.ton_deposit_address || 'Ошибка'; 
+            document.getElementById('dep-eth').innerText = data.eth_deposit_address || 'Ошибка'; 
+          } } catch (e) { console.error(e); } 
         }
         function showScreen(id) { document.querySelectorAll('.screen').forEach(s => s.classList.remove('active')); document.getElementById(id).classList.add('active'); }
+        function copyText(id) { const text = document.getElementById(id).innerText; if (text === 'Ошибка' || text === 'Загрузка...') return; navigator.clipboard.writeText(text).then(() => tg.showAlert('Адрес скопирован!')); }
         loadData();
       </script>
     </body>
