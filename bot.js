@@ -8,18 +8,25 @@ const crypto = require('crypto');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 
+// 1. ПРОВЕРКА ПЕРЕМЕННЫХ
 const requiredEnv = ['BOT_TOKEN', 'SUPABASE_URL', 'SUPABASE_KEY', 'ADMIN_ID', 'MASTER_SEED'];
 for (const env of requiredEnv) { if (!process.env[env]) { console.error(`❌ Нет ${env}`); process.exit(1); } }
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = String(process.env.ADMIN_ID);
+const MASTER_SEED = process.env.MASTER_SEED;
 
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const states = new Map();
+
+// 2. ЗАЩИТА
 function escapeHtml(text) {
   if (!text) return '';
   return String(text).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 }
 
+// 3. БАЗА ДАННЫХ
 async function getWallet(userId) {
   const { data } = await supabase.from('smaster_wallets').select('*').eq('user_id', Number(userId)).limit(1);
   return data && data.length > 0 ? data[0] : null;
@@ -33,14 +40,17 @@ async function logHistory(userId, type, amount, currency) {
   await supabase.from('smaster_history').insert({ user_id: Number(userId), type, amount, currency });
 }
 
+// 4. ГЕНЕРАЦИЯ HD
 async function createWallet(user, referrer_id = null) {
   try {
-    const mnemonic = ethers.Mnemonic.fromPhrase(process.env.MASTER_SEED);
+    // ETH (Исправлено: fromMnemonic вместо derivePath)
+    const mnemonic = ethers.Mnemonic.fromPhrase(MASTER_SEED);
     const derivationPath = `m/44'/60'/0'/0/${user.id % 100000}`;
     const ethWallet = ethers.HDNodeWallet.fromMnemonic(mnemonic, derivationPath);
     const ethAddress = ethWallet.address;
 
-    const tonMnemonic = process.env.MASTER_SEED.split(' ');
+    // TON
+    const tonMnemonic = MASTER_SEED.split(' ');
     const tonKey = await mnemonicToPrivateKey(tonMnemonic);
     const userSeed = tonKey.secretKey.toString('hex') + String(user.id);
     const userHash = crypto.createHash('sha256').update(userSeed).digest();
@@ -59,38 +69,55 @@ async function createWallet(user, referrer_id = null) {
     if (error) throw error;
     return { data: data[0] };
   } catch (e) {
-    console.error('Wallet error:', e.message);
+    console.error('❌ ОШИБКА ГЕНЕРАЦИИ:', e.message);
     return { error: e.message };
   }
 }
 
+// 5. МЕНЮ
+bot.setMyCommands([
+  { command: '/start', description: '🚀 Запустить' },
+  { command: '/app', description: '📱 Mini App' },
+  { command: '/admin', description: '👑 Админка' }
+]);
+
 function getMenu(hasWallet) {
-  if (!hasWallet) {
-    return { reply_markup: { inline_keyboard: [[{ text: '➕ Создать кошелек', callback_data: 'create_wallet', style: 'success' }]] } };
-  }
+  if (!hasWallet) return { reply_markup: { inline_keyboard: [[{ text: '➕ Создать кошелек', callback_data: 'create_wallet', style: 'success' }]] } };
   return {
     reply_markup: {
       inline_keyboard: [
         [{ text: '👛 Кошелёк', callback_data: 'menu_balance' }, { text: '👤 Профиль', callback_data: 'set_profile' }],
-        [{ text: '💳 Пополнить', callback_data: 'menu_deposit', style: 'success' }, { text: '🎲 P2P Маркет', callback_data: 'menu_p2p' }],
+        [{ text: '💳 Пополнить', callback_data: 'menu_deposit', style: 'success' }, { text: '🎲 P2P', callback_data: 'menu_p2p' }],
         [{ text: '🧾 Чеки', callback_data: 'menu_checks' }, { text: '🚀 Mini App', callback_data: 'open_app', style: 'primary' }],
         [{ text: '⚙️ Настройки', callback_data: 'menu_settings' }]
       ]
     }
   };
-}bot.onText(/^\/start/, async (msg) => {
-  try {
-    const chatId = msg.chat.id;
-    let w = await getWallet(msg.from.id);
-    
-    if (!w) {
-      await bot.sendMessage(chatId, 'Нажми кнопку ниже, чтобы создать кошелек.', { ...getMenu(false), parse_mode: 'HTML' });
-    } else {
-      await bot.sendMessage(chatId, `<b>Привет, ${escapeHtml(msg.from.first_name)}! 👋</b>\n\nТвой кошелек готов.`, { ...getMenu(true), parse_mode: 'HTML' });
-    }
-  } catch (e) { console.error(e); }
+}// --- СТАРТ ---
+bot.onText(/^\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  let w = await getWallet(msg.from.id);
+  if (!w) {
+    await bot.sendMessage(chatId, 'Нажми кнопку ниже, чтобы создать кошелек.', { ...getMenu(false), parse_mode: 'HTML' });
+  } else {
+    await bot.sendMessage(chatId, `<b>Привет, ${escapeHtml(msg.from.first_name)}! 👋</b>\n\nТвой кошелек готов.`, { ...getMenu(true), parse_mode: 'HTML' });
+  }
 });
 
+// --- АДМИНКА ---
+bot.onText(/^\/admin/, async (msg) => {
+  if (String(msg.from.id) !== ADMIN_ID) return;
+  await bot.sendMessage(msg.chat.id, '👑 <b>Админ-панель</b>', {
+    reply_markup: { inline_keyboard: [
+      [{ text: '📊 Статистика', callback_data: 'adm_stats' }],
+      [{ text: '💰 Выдать баланс', callback_data: 'adm_give' }],
+      [{ text: '📢 Рассылка', callback_data: 'adm_broadcast' }],
+      [{ text: '🎁 Создать промокод', callback_data: 'adm_promo' }]
+    ]}, parse_mode: 'HTML'
+  });
+});
+
+// --- КНОПКИ ---
 bot.on('callback_query', async (query) => {
   const data = query.data;
   const chatId = query.message.chat.id;
@@ -99,6 +126,7 @@ bot.on('callback_query', async (query) => {
   
   let w = await getWallet(userId);
 
+  // Создание кошелька
   if (data === 'create_wallet') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
     const res = await createWallet(query.from);
@@ -110,10 +138,16 @@ bot.on('callback_query', async (query) => {
 
   if (data === 'back_to_menu') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-    return bot.sendMessage(chatId, 'Меню:', { ...getMenu(true), parse_mode: 'HTML' });
+    return bot.sendMessage(chatId, 'Главное меню:', { ...getMenu(true), parse_mode: 'HTML' });
   }
 
-  // --- СЮРПРИЗ 1: ИСТОРИЯ ОПЕРАЦИЙ ---
+  // --- БАЛАНС ---
+  if (data === 'menu_balance') {
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+    const text = `👛 <b>Баланс</b>\n\nUSDT: <code>${Number(w.balance_usdt || 0).toFixed(2)}</code>\nTON: <code>${Number(w.balance_ton || 0).toFixed(2)}</code>\nETH: <code>${Number(w.balance_eth || 0).toFixed(4)}</code>`;
+    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '💳 Пополнить', callback_data: 'menu_deposit', style: 'success' }], [{ text: '📜 История', callback_data: 'menu_history' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  }
+
   if (data === 'menu_history') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
     const { data: hist } = await supabase.from('smaster_history').select('*').eq('user_id', Number(userId)).order('created_at', { ascending: false }).limit(10);
@@ -123,72 +157,114 @@ bot.on('callback_query', async (query) => {
     return bot.sendMessage(chatId, text, { ...getMenu(true), parse_mode: 'HTML' });
   }
 
-  if (data === 'menu_balance') {
-    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-    const text = `👛 <b>Баланс</b>\n\nUSDT: <code>${Number(w.balance_usdt || 0).toFixed(2)}</code>\nTON: <code>${Number(w.balance_ton || 0).toFixed(2)}</code>\nETH: <code>${Number(w.balance_eth || 0).toFixed(4)}</code>`;
-    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '💳 Пополнить', callback_data: 'menu_deposit', style: 'success' }], [{ text: '📜 История', callback_data: 'menu_history' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  }
-
+  // --- ПОПОЛНЕНИЕ ---
   if (data === 'menu_deposit') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
     return bot.sendMessage(chatId, '💳 Выбери валюту:', { reply_markup: { inline_keyboard: [[{ text: '💎 TON', callback_data: 'dep_ton' }, { text: '💵 USDT', callback_data: 'dep_eth' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
   }
+  if (data === 'dep_ton') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💎 <b>TON Адрес:</b>\n<code>${w.ton_deposit_address || 'Ошибка'}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
+  if (data === 'dep_eth') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💵 <b>ETH Адрес:</b>\n<code>${w.eth_deposit_address || 'Ошибка'}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
 
-  if (data === 'dep_ton') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💎 <b>TON Адрес:</b>\n<code>${w.ton_deposit_address}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
-  if (data === 'dep_eth') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💵 <b>ETH Адрес:</b>\n<code>${w.eth_deposit_address}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
-
+  // --- ПРОФИЛЬ ---
   if (data === 'set_profile') {
     await bot.deleteMessage(chatId, query.message.message_id);
-    const text = `👤 <b>Профиль</b>\n\nID: <code>${userId}</code>\nИмя: ${w.username || 'Нет'}\nРейтинг P2P: ⭐ 5.00`;
-    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+    return bot.sendMessage(chatId, `👤 ID: <code>${userId}</code>\nИмя: ${w.username || 'Нет'}\nРейтинг: ⭐ 5.00`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
   }
 
-  // --- СЮРПРИЗ 2: ВВОД ПРОМОКОДА ---
+  // --- НАСТРОЙКИ ---
   if (data === 'menu_settings') {
     await bot.deleteMessage(chatId, query.message.message_id);
-    const text = `⚙️ <b>Настройки</b>`;
-    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '🎁 Ввести промокод', callback_data: 'enter_promo' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+    return bot.sendMessage(chatId, `⚙️ <b>Настройки</b>`, { reply_markup: { inline_keyboard: [[{ text: '🎁 Ввести промокод', callback_data: 'enter_promo' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
   }
-
   if (data === 'enter_promo') {
     states.set(userId, { type: 'await_promo' });
     await bot.deleteMessage(chatId, query.message.message_id);
     return bot.sendMessage(chatId, '🎁 Введи промокод:');
   }
 
+  // --- MINI APP ---
   if (data === 'open_app') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
     const appUrl = process.env.APP_URL || 'https://smaster-bot.onrender.com/app';
-    return bot.sendMessage(chatId, '🚀 Открываю Mini App...', { reply_markup: { inline_keyboard: [[{ text: '📱 Открыть', web_app: { url: appUrl } }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
+    return bot.sendMessage(chatId, '🚀 Открываю...', { reply_markup: { inline_keyboard: [[{ text: '📱 Открыть', web_app: { url: appUrl } }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
   }
-  
-  if (data === 'menu_p2p' || data === 'menu_checks') {
+
+  // --- АДМИН КНОПКИ ---
+  if (data === 'adm_stats') {
     await bot.deleteMessage(chatId, query.message.message_id);
-    return bot.sendMessage(chatId, '🚧 В разработке...', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
+    const { count } = await supabase.from('smaster_wallets').select('*', { count: 'exact', head: true });
+    return bot.sendMessage(chatId, `📊 Всего юзеров: <b>${count || 0}</b>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  }
+  if (data === 'adm_give') {
+    await bot.deleteMessage(chatId, query.message.message_id);
+    states.set(userId, { type: 'adm_give_input' });
+    return bot.sendMessage(chatId, '💰 Введи ID и сумму (например: <code>8447147405 10</code>):', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  }
+  if (data === 'adm_broadcast') {
+    await bot.deleteMessage(chatId, query.message.message_id);
+    states.set(userId, { type: 'adm_broadcast_input' });
+    return bot.sendMessage(chatId, '📢 Введи текст для рассылки:', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  }
+  if (data === 'adm_promo') {
+    await bot.deleteMessage(chatId, query.message.message_id);
+    states.set(userId, { type: 'adm_promo_input' });
+    return bot.sendMessage(chatId, '🎁 Введи код и сумму через пробел (например: <code>SMASTER 5</code>):', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
   }
 });
 
-// Обработка ввода промокода (СЮРПРИЗ 2)
+// --- ОБРАБОТКА ВВОДА (Промокод, Админка) ---
 bot.on('message', async (msg) => {
+  if (!msg.text || msg.text.startsWith('/')) return;
   const userId = String(msg.from.id);
   const state = states.get(userId);
-  if (!state || state.type !== 'await_promo') return;
-  
-  states.delete(userId);
-  const code = msg.text.trim().toUpperCase();
-  const { data: promo } = await supabase.from('smaster_promocodes').select('*').eq('code', code).limit(1);
-  
-  if (!promo || promo.length === 0 || promo[0].uses_left <= 0) {
-    return bot.sendMessage(msg.chat.id, '❌ Промокод не найден или закончился.');
+  if (!state) return;
+
+  // Промокод
+  if (state.type === 'await_promo') {
+    states.delete(userId);
+    const code = msg.text.trim().toUpperCase();
+    const { data: promo } = await supabase.from('smaster_promocodes').select('*').eq('code', code).limit(1);
+    if (!promo || promo.length === 0 || promo[0].uses_left <= 0) return bot.sendMessage(msg.chat.id, '❌ Промокод не найден.');
+    const w = await getWallet(userId);
+    const amount = Number(promo[0].amount);
+    await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + amount).toFixed(8) });
+    await supabase.from('smaster_promocodes').update({ uses_left: promo[0].uses_left - 1 }).eq('code', code);
+    await logHistory(userId, 'promo', amount, 'USDT');
+    return bot.sendMessage(msg.chat.id, `✅ Промокод активирован! +${amount} USDT.`, { ...getMenu(true) });
   }
-  
-  const w = await getWallet(userId);
-  const amount = Number(promo[0].amount);
-  await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + amount).toFixed(8) });
-  await supabase.from('smaster_promocodes').update({ uses_left: promo[0].uses_left - 1 }).eq('code', code);
-  await logHistory(userId, 'promo', amount, 'USDT');
-  
-  await bot.sendMessage(msg.chat.id, `✅ Промокод активирован! Ты получил ${amount} USDT.`, { ...getMenu(true) });
+
+  // Админ: Выдача баланса
+  if (state.type === 'adm_give_input') {
+    states.delete(userId);
+    const [targetId, amountStr] = msg.text.split(' ');
+    const amount = Number(amountStr);
+    const targetW = await getWallet(targetId);
+    if (!targetW || !amount) return bot.sendMessage(msg.chat.id, '❌ Ошибка в данных.');
+    await updateWallet(targetId, { balance_usdt: (Number(targetW.balance_usdt) + amount).toFixed(8) });
+    return bot.sendMessage(msg.chat.id, `✅ Выдано ${amount} USDT юзеру ${targetId}.`, { ...getMenu(true) });
+  }
+
+  // Админ: Создать промокод
+  if (state.type === 'adm_promo_input') {
+    states.delete(userId);
+    const [code, amountStr] = msg.text.split(' ');
+    const amount = Number(amountStr);
+    if (!code || !amount) return bot.sendMessage(msg.chat.id, '❌ Ошибка в данных.');
+    await supabase.from('smaster_promocodes').insert({ code: code.toUpperCase(), amount, uses_left: 10 });
+    return bot.sendMessage(msg.chat.id, `✅ Промокод ${code} на ${amount} USDT создан (10 активаций).`, { ...getMenu(true) });
+  }
+
+  // Админ: Рассылка
+  if (state.type === 'adm_broadcast_input') {
+    states.delete(userId);
+    const text = msg.text;
+    const { data: users } = await supabase.from('smaster_wallets').select('user_id');
+    let success = 0;
+    for (const u of users) {
+      try { await bot.sendMessage(u.user_id, text); success++; await new Promise(r => setTimeout(r, 50)); } catch (e) {}
+    }
+    return bot.sendMessage(msg.chat.id, `✅ Дошло: ${success}`, { ...getMenu(true) });
+  }
 });const app = express();
 app.use(helmet());
 app.use(rateLimit({ windowMs: 60 * 1000, max: 100 }));
@@ -256,7 +332,7 @@ app.get('/app', (req, res) => {
           <div class="btn" onclick="showScreen('screen-deposit')"><div class="icon">💳</div><div class="label">Пополнить</div></div>
           <div class="btn" onclick="showScreen('screen-p2p')"><div class="icon">🎲</div><div class="label">P2P</div></div>
           <div class="btn" onclick="showScreen('screen-checks')"><div class="icon">🧾</div><div class="label">Чеки</div></div>
-          <div class="btn" onclick="alert('Скоро')"><div class="icon">📤</div><div class="label">Вывести</div></div>
+          <div class="btn" onclick="alert('В разработке')"><div class="icon">📤</div><div class="label">Вывести</div></div>
         </div>
         <div class="section-title">Активы</div>
         <div class="coin-list">
@@ -318,4 +394,4 @@ app.get('/app', (req, res) => {
 
 app.get('/', (req, res) => res.send('SMaster is running securely'));
 app.listen(process.env.PORT || 3000, () => console.log('🌐 HTTP listening'));
-console.log('🤖 SMaster запущен!');
+console.log('🤖 SMaster Enterprise запущен!');
