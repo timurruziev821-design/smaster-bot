@@ -1,4 +1,12 @@
-"dependencies": {
+{
+  "name": "smaster-secure-bot",
+  "version": "5.0.0",
+  "description": "SMaster Crypto Wallet Bot",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
     "@ton/crypto": "^3.2.0",
     "@ton/ton": "^13.11.2",
@@ -8,4 +16,8 @@
     "helmet": "^7.1.0",
     "node-telegram-bot-api": "^0.64.0",
     "tronweb": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
