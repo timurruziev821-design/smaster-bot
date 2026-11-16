@@ -31,12 +31,10 @@ async function updateWallet(userId, patch) {
 
 async function createWallet(user, referrer_id = null) {
   try {
-    // ETH HD
     const hdNode = ethers.HDNodeWallet.fromPhrase(process.env.MASTER_SEED);
     const ethWallet = hdNode.derivePath(`m/44'/60'/0'/0/${user.id % 100000}`);
     const ethAddress = ethWallet.address;
 
-    // TON HD
     const tonMnemonic = process.env.MASTER_SEED.split(' ');
     const tonKey = await mnemonicToPrivateKey(tonMnemonic);
     const userSeed = tonKey.secretKey.toString('hex') + String(user.id);
@@ -62,7 +60,7 @@ async function createWallet(user, referrer_id = null) {
 }
 
 bot.setMyCommands([
-  { command: '/start', description: '🚀 Запустить бота' },
+  { command: '/start', description: '🚀 Запустить' },
   { command: '/app', description: '📱 Mini App' }
 ]);
 
@@ -71,8 +69,9 @@ function getMainMenu() {
     reply_markup: {
       inline_keyboard: [
         [{ text: '👛 Кошелёк', callback_data: 'menu_balance' }, { text: '👤 Профиль', callback_data: 'set_profile' }],
-        [{ text: '💳 Пополнить', callback_data: 'menu_deposit', style: 'success' }, { text: '🎲 P2P', callback_data: 'menu_p2p' }],
-        [{ text: '🚀 Mini App', callback_data: 'open_app', style: 'primary' }, { text: '⚙️ Настройки', callback_data: 'menu_settings' }]
+        [{ text: '💳 Пополнить', callback_data: 'menu_deposit', style: 'success' }, { text: '🎲 P2P Маркет', callback_data: 'menu_p2p' }],
+        [{ text: '🧾 Чеки', callback_data: 'menu_checks' }, { text: '🚀 Mini App', callback_data: 'open_app', style: 'primary' }],
+        [{ text: '⚙️ Настройки', callback_data: 'menu_settings' }]
       ]
     }
   };
@@ -117,20 +116,50 @@ bot.on('callback_query', async (query) => {
   if (data === 'dep_ton') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💎 <b>TON Адрес:</b>\n<code>${w.ton_deposit_address || 'Ошибка'}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
   if (data === 'dep_eth') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💵 <b>ETH Адрес:</b>\n<code>${w.eth_deposit_address || 'Ошибка'}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
 
+  if (data === 'set_profile') {
+    await bot.deleteMessage(chatId, query.message.message_id);
+    const text = `👤 <b>Профиль</b>\n\nID: <code>${userId}</code>\nИмя: ${w.username || 'Нет'}\nРейтинг P2P: ⭐ 5.00\nСделок: 0`;
+    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  }
+
+  if (data === 'menu_p2p') {
+    await bot.deleteMessage(chatId, query.message.message_id);
+    const text = `🎲 <b>P2P Маркет</b>\n\nЗдесь вы можете купить или продать USDT.\n\nВыберите действие:`;
+    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [
+      [{ text: '🛒 Купить USDT', callback_data: 'p2p_buy' }],
+      [{ text: '➕ Создать объявление', callback_data: 'p2p_create', style: 'success' }],
+      [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]
+    ]}, parse_mode: 'HTML' });
+  }
+
+  if (data === 'menu_checks') {
+    await bot.deleteMessage(chatId, query.message.message_id);
+    const text = `🧾 <b>Чеки</b>\n\nСоздайте чек и отправьте другу.`;
+    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [
+      [{ text: '➕ Создать чек', callback_data: 'check_create', style: 'success' }],
+      [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]
+    ]}, parse_mode: 'HTML' });
+  }
+
+  if (data === 'menu_settings') {
+    await bot.deleteMessage(chatId, query.message.message_id);
+    const text = `⚙️ <b>Настройки</b>\n\nУправляйте аккаунтом:`;
+    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [
+      [{ text: '🔔 Уведомления', callback_data: 'settings_notify' }],
+      [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]
+    ]}, parse_mode: 'HTML' });
+  }
+
+  if (data === 'settings_notify') {
+    const newStatus = !w.notifications;
+    await updateWallet(userId, { notifications: newStatus });
+    await bot.answerCallbackQuery(query.id, { text: newStatus ? '🔔 Включены' : '🔕 Выключены' }).catch(() => {});
+  }
+
   if (data === 'open_app') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
     const appUrl = process.env.APP_URL || 'https://smaster-bot.onrender.com/app';
     return bot.sendMessage(chatId, '🚀 Открываю Mini App...', { reply_markup: { inline_keyboard: [[{ text: '📱 Открыть', web_app: { url: appUrl } }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
-  }
-
-  if (data === 'set_profile') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    return bot.sendMessage(chatId, `👤 ID: <code>${userId}</code>\nИмя: ${w.username || 'Нет'}\nРейтинг: ⭐ 5.00`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  }
-  
-  if (data === 'menu_p2p' || data === 'menu_settings') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    return bot.sendMessage(chatId, '🚧 В разработке...', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
   }
 });const app = express();
 app.use(helmet());
@@ -141,7 +170,10 @@ app.get('/api/user/:id', async (req, res) => {
   try {
     const w = await getWallet(req.params.id);
     if (!w) return res.status(404).json({ error: 'Not found' });
-    res.json({ balance_usdt: w.balance_usdt, balance_ton: w.balance_ton, balance_eth: w.balance_eth, ton_deposit_address: w.ton_deposit_address, eth_deposit_address: w.eth_deposit_address });
+    res.json({ 
+      balance_usdt: w.balance_usdt, balance_ton: w.balance_ton, balance_eth: w.balance_eth, 
+      ton_deposit_address: w.ton_deposit_address, eth_deposit_address: w.eth_deposit_address 
+    });
   } catch (e) { res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -161,7 +193,7 @@ app.get('/app', (req, res) => {
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
         .logo { font-size: 26px; font-weight: 900; background: linear-gradient(90deg, var(--accent-pink), #8a2be2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
         .avatar { width: 44px; height: 44px; border-radius: 50%; background: linear-gradient(135deg, var(--accent-pink), #8a2be2); display: flex; justify-content: center; align-items: center; font-weight: bold; }
-        .balance-card { background: var(--bg-card); border-radius: 24px; padding: 24px; margin-bottom: 20px; border: 1px solid rgba(255, 0, 127, 0.1); position: relative; overflow: hidden; }
+        .balance-card { background: var(--bg-card); border-radius: 24px; padding: 24px; margin-bottom: 20px; border: 1px solid rgba(255, 0, 127, 0.1); }
         .balance-title { font-size: 14px; color: var(--text-muted); margin-bottom: 8px; }
         .balance-amount { font-size: 40px; font-weight: 800; }
         .balance-amount span { color: #00ff88; }
@@ -198,7 +230,7 @@ app.get('/app', (req, res) => {
         <div class="grid">
           <div class="btn" onclick="showScreen('screen-deposit')"><div class="icon">💳</div><div class="label">Пополнить</div></div>
           <div class="btn" onclick="showScreen('screen-p2p')"><div class="icon">🎲</div><div class="label">P2P</div></div>
-          <div class="btn" onclick="alert('В разработке')"><div class="icon">🧾</div><div class="label">Чеки</div></div>
+          <div class="btn" onclick="showScreen('screen-checks')"><div class="icon">🧾</div><div class="label">Чеки</div></div>
           <div class="btn" onclick="alert('В разработке')"><div class="icon">📤</div><div class="label">Вывести</div></div>
         </div>
         <div class="section-title">Активы</div>
@@ -215,11 +247,13 @@ app.get('/app', (req, res) => {
         <div class="address-card"><div class="address-title"><span>ETH</span><span style="color:#8a2be2;">Сеть: ERC20</span></div><div class="address-box" id="dep-eth">Загрузка...</div><button class="copy-btn" onclick="copyText('dep-eth')">Копировать</button></div>
       </div>
 
-      <div id="screen-p2p" class="screen"><div class="header"><div class="logo" style="font-size:20px;">P2P</div><div style="cursor:pointer;" onclick="showScreen('screen-main')">✕</div></div><div class="balance-card" style="text-align:center;"><div style="font-size:40px;">🎲</div><div>P2P Маркет</div><div style="font-size:14px;color:#888;">Скоро здесь можно будет покупать USDT.</div></div></div>
+      <div id="screen-p2p" class="screen"><div class="header"><div class="logo" style="font-size:20px;">P2P</div><div style="cursor:pointer;" onclick="showScreen('screen-main')">✕</div></div><div class="balance-card" style="text-align:center;"><div style="font-size:40px;">🎲</div><div>P2P Маркет</div><div style="font-size:14px;color:#888;">Сделки доступны в боте.</div></div></div>
+      <div id="screen-checks" class="screen"><div class="header"><div class="logo" style="font-size:20px;">Чеки</div><div style="cursor:pointer;" onclick="showScreen('screen-main')">✕</div></div><div class="balance-card" style="text-align:center;"><div style="font-size:40px;">🧾</div><div>Чеки</div><div style="font-size:14px;color:#888;">Создание чеков доступно в боте.</div></div></div>
 
       <div class="bottom-nav">
         <div class="nav-item active" onclick="showScreen('screen-main')"><div class="nav-icon">🏠</div>Главная</div>
         <div class="nav-item" onclick="showScreen('screen-p2p')"><div class="nav-icon">🎲</div>P2P</div>
+        <div class="nav-item" onclick="showScreen('screen-checks')"><div class="nav-icon">🧾</div>Чеки</div>
         <div class="nav-item" onclick="showScreen('screen-deposit')"><div class="nav-icon">💳</div>Пополнить</div>
       </div>
       <script>
@@ -242,12 +276,13 @@ app.get('/app', (req, res) => {
           document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
           if(id === 'screen-main') document.querySelectorAll('.nav-item')[0].classList.add('active');
           if(id === 'screen-p2p') document.querySelectorAll('.nav-item')[1].classList.add('active');
-          if(id === 'screen-deposit') document.querySelectorAll('.nav-item')[2].classList.add('active');
+          if(id === 'screen-checks') document.querySelectorAll('.nav-item')[2].classList.add('active');
+          if(id === 'screen-deposit') document.querySelectorAll('.nav-item')[3].classList.add('active');
         }
         function copyText(id) { 
           const text = document.getElementById(id).innerText; 
           if (text === 'Ошибка' || text === 'Загрузка...') return; 
-          navigator.clipboard.writeText(text).then(() => tg.showAlert('Адрес скопирован!')); 
+          navigator.clipboard.writeText(text).then(() => tg.showAlert('Скопировано!')); 
         }
         loadData();
       </script>
