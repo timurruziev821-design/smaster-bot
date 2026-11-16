@@ -337,4 +337,278 @@ async function showWallet(chatId, userId, messageId = null) {
         const text =
             `💼 <b>Ваш кошелёк SMaster</b>\n\n` +
             `💵 USDT: <b>${formatAmount(wallet.balance_usdt)}</b> (~${escapeHTML(approxFiat)})\n` +
-            `💎 TON: <b>${formatAmount(wallet.balance_ton)}</b>\n\n` +
+
+```javascript
+async function showChecks(chatId, messageId = null) {
+    return deleteAndSend(chatId, messageId, '🎁 <b>Чеки SMaster</b>\n\nСоздавайте чеки в USDT и делитесь ими по ссылке:', {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '➕ Создать чек (USDT)', callback_data: 'check_create' }],
+                [{ text: '🎁 Активировать по ID', callback_data: 'check_activate' }],
+                [{ text: '⬅️ Назад', callback_data: 'home' }]
+            ]
+        }
+    });
+}
+
+async function createCheck(chatId, userId, amount) {
+    let deducted = false;
+    try {
+        await updateBalance(userId, 'USDT', -amount, 'check_create');
+        deducted = true;
+
+        const check = await dbQuery(
+            supabase
+                .from('smaster_checks')
+                .insert({
+                    creator_id: Number(userId),
+                    amount: Number(amount),
+                    status: 'active',
+                    claimed_by: null,
+                    limit_activations: 1
+                })
+                .select()
+                .single()
+        );
+
+        const botUsername = await getBotUsername();
+        const link = `https://t.me{botUsername}?start=check_${check.id}`;
+        const imageUrl = `https://placehold.co{amount}+USDT`;
+
+        await bot.sendPhoto(chatId, imageUrl, {
+            caption:
+                `🎁 <b>Чек SMaster создан!</b>\n\n` +
+                `💵 Номинал: <b>${formatAmount(amount)} USDT</b>\n` +
+                `🆔 ID чека: <code>${escapeHTML(check.id)}</code>\n` +
+                `🔗 Ссылка для активации:\n<code>${escapeHTML(link)}</code>`,
+            parse_mode: 'HTML',
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: '🎁 Активировать чек', url: link }],
+                    [{ text: '⬅️ В меню', callback_data: 'home' }]
+                ]
+            }
+        });
+    } catch (e) {
+        if (deducted) {
+            await updateBalance(userId, 'USDT', amount, 'check_refund').catch(() => {});
+        }
+        await send(chatId, `❌ Ошибка БД: ${escapeHTML(e.message)}`, getMainMenu());
+    }
+}
+
+async function activateCheck(chatId, userId, checkId) {
+    try {
+        const check = await dbQuery(
+            supabase
+                .from('smaster_checks')
+                .select('*')
+                .eq('id', checkId)
+                .maybeSingle()
+        );
+
+        if (!check) {
+            return send(chatId, '❌ Чек не найден.', getMainMenu());
+        }
+        if (Number(check.creator_id) === Number(userId)) {
+            return send(chatId, '❌ Нельзя активировать собственный чек.', getMainMenu());
+        }
+        if (check.status !== 'active') {
+            return send(chatId, '❌ Этот чек уже активирован или недействителен.', getMainMenu());
+        }
+
+        const updated = await dbQuery(
+            supabase
+                .from('smaster_checks')
+                .update({ status: 'claimed', claimed_by: Number(userId) })
+                .eq('id', checkId)
+                .eq('status', 'active')
+                .select()
+        );
+
+        if (!updated || updated.length === 0) {
+            return send(chatId, '❌ Чек уже успел забрать другой пользователь.', getMainMenu());
+        }
+
+        await updateBalance(userId, 'USDT', Number(check.amount), 'check_claim');
+
+        await send(
+            chatId,
+            `🎉 <b>Чек успешно активирован!</b>\n\n💵 Зачислено: <b>+${formatAmount(check.amount)} USDT</b>`,
+            getMainMenu()
+        );
+
+        const creator = await getUser(check.creator_id);
+        if (creator?.notifications) {
+            await send(check.creator_id, `🎁 Ваш чек #${escapeHTML(check.id)} на <b>${formatAmount(check.amount)} USDT</b> был активирован!`);
+        }
+    } catch (e) {
+        await send(chatId, `❌ Ошибка БД: ${escapeHTML(e.message)}`, getMainMenu());
+    }
+}
+
+async function showInvoiceMenu(chatId, messageId = null) {
+    return deleteAndSend(chatId, messageId, '📄 <b>Счета SMaster</b>', {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '➕ Создать счёт', callback_data: 'invoice_create' }],
+                [{ text: '📄 Мои счета', callback_data: 'invoice_mine' }],
+                [{ text: '⬅️ Назад', callback_data: 'home' }]
+            ]
+        }
+    });
+}
+
+async function showInvoiceCurrencies(chatId, messageId = null) {
+    const keyboard = [];
+    for (let i = 0; i < CURRENCIES.length; i += 3) {
+        keyboard.push(
+            CURRENCIES.slice(i, i + 3).map(currency => ({
+                text: currency,
+                callback_data: `invcur_${currency}`
+            }))
+        );
+    }
+    keyboard.push([{ text: '⬅️ Назад', callback_data: 'invoices' }]);
+
+    return deleteAndSend(chatId, messageId, '💱 <b>Выберите валюту счёта:</b>', {
+        reply_markup: { inline_keyboard: keyboard }
+    });
+}
+
+async function showInvoiceAmount(chatId, currency, userId, messageId = null) {
+    setState(userId, 'invoice_amount', { currency });
+    return deleteAndSend(
+        chatId,
+        messageId,
+        `💵 Выбрана валюта: <b>${escapeHTML(currency)}</b>\n\nВыберите быструю сумму или введите её числом вручную:`,
+        {
+            reply_markup: {
+                inline_keyboard: [
+                    [
+                        { text: '1', callback_data: 'invamount_1' },
+                        { text: '2', callback_data: 'invamount_2' }
+                    ],
+                    [{ text: '⬅️ Назад', callback_data: 'invoice_create' }]
+                ]
+            }
+        }
+    );
+}
+
+async function createInvoice(chatId, userId, amount, currency) {
+    try {
+        const invoice = await dbQuery(
+            supabase
+                .from('smaster_invoices')
+                .insert({
+                    creator_id: Number(userId),
+                    amount: Number(amount),
+                    currency: String(currency),
+                    status: 'pending',
+                    paid_by: null
+                })
+                .select()
+                .single()
+        );
+
+        const botUsername = await getBotUsername();
+        const link = `https://t.me{botUsername}?start=invoice_${invoice.id}`;
+
+        await send(
+            chatId,
+            `📄 <b>Счёт создан!</b>\n\n` +
+            `💰 Сумма: <b>${formatAmount(amount)} ${escapeHTML(currency)}</b>\n` +
+            `🆔 ID: <code>${escapeHTML(invoice.id)}</code>\n` +
+            `🔗 Ссылка на оплату:\n<code>${escapeHTML(link)}</code>`,
+            {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: '📄 Открыть счёт', url: link }],
+                        [{ text: '⬅️ В меню', callback_data: 'home' }]
+                    ]
+                }
+            }
+        );
+    } catch (e) {
+        await send(chatId, `❌ Ошибка БД: ${escapeHTML(e.message)}`, getMainMenu());
+    }
+}
+
+async function showMyInvoices(chatId, userId, messageId = null) {
+    try {
+        const invoices = await dbQuery(
+            supabase
+                .from('smaster_invoices')
+                .select('*')
+                .eq('creator_id', Number(userId))
+                .order('created_at', { ascending: false })
+                .limit(15)
+        );
+
+        if (!invoices.length) {
+            return deleteAndSend(chatId, messageId, '📄 У вас пока нет созданных счетов.', {
+                reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'invoices' }]] }
+            });
+        }
+
+        const list = invoices.map(inv => {
+            const st = inv.status === 'paid' ? '✅ Оплачен' : '⏳ Ожидает';
+            return `• <b>#${escapeHTML(inv.id)}</b> — ${formatAmount(inv.amount)} ${escapeHTML(inv.currency)} (${st})`;
+        }).join('\n');
+
+        return deleteAndSend(chatId, messageId, `📄 <b>Мои счета:</b>\n\n${list}`, {
+            reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'invoices' }]] }
+        });
+    } catch (e) {
+        return send(chatId, `❌ Ошибка БД: ${escapeHTML(e.message)}`);
+    }
+}
+
+async function showInvoiceConfirmation(chatId, userId, invoiceId) {
+    try {
+        const invoice = await dbQuery(
+            supabase
+                .from('smaster_invoices')
+                .select('*')
+                .eq('id', invoiceId)
+                .maybeSingle()
+        );
+
+        if (!invoice) {
+            return send(chatId, '❌ Счёт не найден.', getMainMenu());
+        }
+        if (invoice.status !== 'pending') {
+            return send(chatId, '❌ Этот счёт уже оплачен или отменён.', getMainMenu());
+        }
+        if (Number(invoice.creator_id) === Number(userId)) {
+            return send(chatId, '❌ Нельзя оплатить собственный счёт.', getMainMenu());
+        }
+
+        setState(userId, 'invoice_confirm', { invoiceId: String(invoice.id) });
+
+        return send(
+            chatId,
+            `📄 <b>Подтверждение оплаты счёта #${escapeHTML(invoice.id)}</b>\n\n` +
+            `💰 Сумма к списанию: <b>${formatAmount(invoice.amount)} ${escapeHTML(invoice.currency)}</b>\n\n` +
+            `Вы подтверждаете оплату?`,
+            {
+                reply_markup: {
+                    inline_keyboard: [
+                        [
+                            { text: '✅ Да, оплатить', callback_data: 'invoice_yes' },
+                            { text: '❌ Нет, отмена', callback_data: 'invoice_no' }
+                        ]
+                    ]
+                }
+            }
+        );
+    } catch (e) {
+        return send(chatId, `❌ Ошибка БД: ${escapeHTML(e.message)}`);
+    }
+}
+
+async function payInvoice(chatId, userId, messageId = null) {
+    try {
+        const state = getState(userId);
+        if (!state || state.action !== 'invoice_confirm') {
