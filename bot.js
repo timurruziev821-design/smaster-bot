@@ -6,27 +6,18 @@ const { WalletContractV4 } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const crypto = require('crypto');
 const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
 
-// 1. ПРОВЕРКА ПЕРЕМЕННЫХ
-const requiredEnv = ['BOT_TOKEN', 'SUPABASE_URL', 'SUPABASE_KEY', 'ADMIN_ID', 'MASTER_SEED'];
-for (const env of requiredEnv) { if (!process.env[env]) { console.error(`❌ Нет ${env}`); process.exit(1); } }
-
-const BOT_TOKEN = process.env.BOT_TOKEN;
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const ADMIN_ID = String(process.env.ADMIN_ID);
 const MASTER_SEED = process.env.MASTER_SEED;
-
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const states = new Map();
 
-// 2. ЗАЩИТА
 function escapeHtml(text) {
   if (!text) return '';
   return String(text).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 }
 
-// 3. БАЗА ДАННЫХ
 async function getWallet(userId) {
   const { data } = await supabase.from('smaster_wallets').select('*').eq('user_id', Number(userId)).limit(1);
   return data && data.length > 0 ? data[0] : null;
@@ -36,50 +27,28 @@ async function updateWallet(userId, patch) {
   await supabase.from('smaster_wallets').update(patch).eq('user_id', Number(userId));
 }
 
-async function logHistory(userId, type, amount, currency) {
-  await supabase.from('smaster_history').insert({ user_id: Number(userId), type, amount, currency });
-}
-
-// 4. ГЕНЕРАЦИЯ HD
-async function createWallet(user, referrer_id = null) {
+async function createWallet(user) {
   try {
-    // ETH (Исправлено: fromMnemonic вместо derivePath)
     const mnemonic = ethers.Mnemonic.fromPhrase(MASTER_SEED);
-    const derivationPath = `m/44'/60'/0'/0/${user.id % 100000}`;
-    const ethWallet = ethers.HDNodeWallet.fromMnemonic(mnemonic, derivationPath);
-    const ethAddress = ethWallet.address;
-
-    // TON
+    const ethWallet = ethers.HDNodeWallet.fromMnemonic(mnemonic, `m/44'/60'/0'/0/${user.id % 100000}`);
+    
     const tonMnemonic = MASTER_SEED.split(' ');
     const tonKey = await mnemonicToPrivateKey(tonMnemonic);
     const userSeed = tonKey.secretKey.toString('hex') + String(user.id);
     const userHash = crypto.createHash('sha256').update(userSeed).digest();
     const userPublicKey = userHash.subarray(0, 32);
     const tonWallet = WalletContractV4.create({ publicKey: userPublicKey, workchain: 0 });
-    const tonAddress = tonWallet.address.toString({ bounceable: false });
-
+    
     const { data, error } = await supabase.from('smaster_wallets').insert({
       user_id: Number(user.id),
       username: user.username ? escapeHtml(user.username) : null,
-      ton_deposit_address: tonAddress,
-      eth_deposit_address: ethAddress,
-      referrer_id: referrer_id ? Number(referrer_id) : null
+      ton_deposit_address: tonWallet.address.toString({ bounceable: false }),
+      eth_deposit_address: ethWallet.address
     }).select();
-
     if (error) throw error;
     return { data: data[0] };
-  } catch (e) {
-    console.error('❌ ОШИБКА ГЕНЕРАЦИИ:', e.message);
-    return { error: e.message };
-  }
+  } catch (e) { return { error: e.message }; }
 }
-
-// 5. МЕНЮ
-bot.setMyCommands([
-  { command: '/start', description: '🚀 Запустить' },
-  { command: '/app', description: '📱 Mini App' },
-  { command: '/admin', description: '👑 Админка' }
-]);
 
 function getMenu(hasWallet) {
   if (!hasWallet) return { reply_markup: { inline_keyboard: [[{ text: '➕ Создать кошелек', callback_data: 'create_wallet', style: 'success' }]] } };
@@ -88,194 +57,188 @@ function getMenu(hasWallet) {
       inline_keyboard: [
         [{ text: '👛 Кошелёк', callback_data: 'menu_balance' }, { text: '👤 Профиль', callback_data: 'set_profile' }],
         [{ text: '💳 Пополнить', callback_data: 'menu_deposit', style: 'success' }, { text: '🎲 P2P', callback_data: 'menu_p2p' }],
-        [{ text: '🧾 Чеки', callback_data: 'menu_checks' }, { text: '🚀 Mini App', callback_data: 'open_app', style: 'primary' }],
-        [{ text: '⚙️ Настройки', callback_data: 'menu_settings' }]
+        [{ text: '🧾 Чеки', callback_data: 'menu_checks' }, { text: '📄 Счета', callback_data: 'menu_invoices' }],
+        [{ text: '🚀 Mini App', callback_data: 'open_app', style: 'primary' }]
       ]
     }
   };
-}// --- СТАРТ ---
-bot.onText(/^\/start/, async (msg) => {
-  const chatId = msg.chat.id;
-  let w = await getWallet(msg.from.id);
-  if (!w) {
-    await bot.sendMessage(chatId, 'Нажми кнопку ниже, чтобы создать кошелек.', { ...getMenu(false), parse_mode: 'HTML' });
-  } else {
-    await bot.sendMessage(chatId, `<b>Привет, ${escapeHtml(msg.from.first_name)}! 👋</b>\n\nТвой кошелек готов.`, { ...getMenu(true), parse_mode: 'HTML' });
-  }
-});
-
-// --- АДМИНКА ---
-bot.onText(/^\/admin/, async (msg) => {
-  if (String(msg.from.id) !== ADMIN_ID) return;
-  await bot.sendMessage(msg.chat.id, '👑 <b>Админ-панель</b>', {
-    reply_markup: { inline_keyboard: [
-      [{ text: '📊 Статистика', callback_data: 'adm_stats' }],
-      [{ text: '💰 Выдать баланс', callback_data: 'adm_give' }],
-      [{ text: '📢 Рассылка', callback_data: 'adm_broadcast' }],
-      [{ text: '🎁 Создать промокод', callback_data: 'adm_promo' }]
-    ]}, parse_mode: 'HTML'
-  });
-});
-
-// --- КНОПКИ ---
-bot.on('callback_query', async (query) => {
+}bot.on('callback_query', async (query) => {
   const data = query.data;
   const chatId = query.message.chat.id;
   const userId = query.from.id;
   await bot.answerCallbackQuery(query.id).catch(() => {});
-  
   let w = await getWallet(userId);
 
-  // Создание кошелька
   if (data === 'create_wallet') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
     const res = await createWallet(query.from);
-    if (res.error) return bot.sendMessage(chatId, `❌ Ошибка: ${res.error}`, { ...getMenu(false) });
-    return bot.sendMessage(chatId, '✅ <b>Кошелек создан!</b>', { ...getMenu(true), parse_mode: 'HTML' });
+    if (res.error) return bot.sendMessage(chatId, `❌ ${res.error}`);
+    return bot.sendMessage(chatId, '✅ Кошелек создан!', { ...getMenu(true) });
   }
-
-  if (!w) return bot.sendMessage(chatId, 'Нажми /start', { ...getMenu(false) });
+  if (!w) return bot.sendMessage(chatId, 'Нажми /start');
 
   if (data === 'back_to_menu') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-    return bot.sendMessage(chatId, 'Главное меню:', { ...getMenu(true), parse_mode: 'HTML' });
+    return bot.sendMessage(chatId, 'Меню:', { ...getMenu(true) });
   }
 
-  // --- БАЛАНС ---
-  if (data === 'menu_balance') {
+  // --- ЧЕКИ ---
+  if (data === 'menu_checks') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-    const text = `👛 <b>Баланс</b>\n\nUSDT: <code>${Number(w.balance_usdt || 0).toFixed(2)}</code>\nTON: <code>${Number(w.balance_ton || 0).toFixed(2)}</code>\nETH: <code>${Number(w.balance_eth || 0).toFixed(4)}</code>`;
-    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '💳 Пополнить', callback_data: 'menu_deposit', style: 'success' }], [{ text: '📜 История', callback_data: 'menu_history' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+    return bot.sendMessage(chatId, '🧾 <b>Чеки SMaster</b>\n\nВыбери тип:', {
+      reply_markup: { inline_keyboard: [
+        [{ text: '🎁 Создать чек', callback_data: 'check_create' }],
+        [{ text: '🎫 Активировать', callback_data: 'check_activate' }],
+        [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]
+      ]}, parse_mode: 'HTML'
+    });
   }
 
-  if (data === 'menu_history') {
+  if (data === 'check_create') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-    const { data: hist } = await supabase.from('smaster_history').select('*').eq('user_id', Number(userId)).order('created_at', { ascending: false }).limit(10);
-    if (!hist || hist.length === 0) return bot.sendMessage(chatId, '📭 История пуста.', { ...getMenu(true) });
-    let text = `📜 <b>История операций:</b>\n\n`;
-    for (const h of hist) text += `• ${h.type.toUpperCase()}: ${Number(h.amount).toFixed(2)} ${h.currency} (${new Date(h.created_at).toLocaleDateString()})\n`;
-    return bot.sendMessage(chatId, text, { ...getMenu(true), parse_mode: 'HTML' });
+    states.set(userId, { type: 'check_amount' });
+    return bot.sendMessage(chatId, 'Введи сумму в USDT для чека:');
   }
 
-  // --- ПОПОЛНЕНИЕ ---
-  if (data === 'menu_deposit') {
+  if (data === 'check_activate') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-    return bot.sendMessage(chatId, '💳 Выбери валюту:', { reply_markup: { inline_keyboard: [[{ text: '💎 TON', callback_data: 'dep_ton' }, { text: '💵 USDT', callback_data: 'dep_eth' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
-  }
-  if (data === 'dep_ton') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💎 <b>TON Адрес:</b>\n<code>${w.ton_deposit_address || 'Ошибка'}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
-  if (data === 'dep_eth') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💵 <b>ETH Адрес:</b>\n<code>${w.eth_deposit_address || 'Ошибка'}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
-
-  // --- ПРОФИЛЬ ---
-  if (data === 'set_profile') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    return bot.sendMessage(chatId, `👤 ID: <code>${userId}</code>\nИмя: ${w.username || 'Нет'}\nРейтинг: ⭐ 5.00`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  }
-
-  // --- НАСТРОЙКИ ---
-  if (data === 'menu_settings') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    return bot.sendMessage(chatId, `⚙️ <b>Настройки</b>`, { reply_markup: { inline_keyboard: [[{ text: '🎁 Ввести промокод', callback_data: 'enter_promo' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  }
-  if (data === 'enter_promo') {
-    states.set(userId, { type: 'await_promo' });
-    await bot.deleteMessage(chatId, query.message.message_id);
-    return bot.sendMessage(chatId, '🎁 Введи промокод:');
-  }
-
-  // --- MINI APP ---
-  if (data === 'open_app') {
-    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-    const appUrl = process.env.APP_URL || 'https://smaster-bot.onrender.com/app';
-    return bot.sendMessage(chatId, '🚀 Открываю...', { reply_markup: { inline_keyboard: [[{ text: '📱 Открыть', web_app: { url: appUrl } }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
-  }
-
-  // --- АДМИН КНОПКИ ---
-  if (data === 'adm_stats') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    const { count } = await supabase.from('smaster_wallets').select('*', { count: 'exact', head: true });
-    return bot.sendMessage(chatId, `📊 Всего юзеров: <b>${count || 0}</b>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  }
-  if (data === 'adm_give') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    states.set(userId, { type: 'adm_give_input' });
-    return bot.sendMessage(chatId, '💰 Введи ID и сумму (например: <code>8447147405 10</code>):', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  }
-  if (data === 'adm_broadcast') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    states.set(userId, { type: 'adm_broadcast_input' });
-    return bot.sendMessage(chatId, '📢 Введи текст для рассылки:', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  }
-  if (data === 'adm_promo') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    states.set(userId, { type: 'adm_promo_input' });
-    return bot.sendMessage(chatId, '🎁 Введи код и сумму через пробел (например: <code>SMASTER 5</code>):', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+    states.set(userId, { type: 'check_activate_id' });
+    return bot.sendMessage(chatId, 'Введи ID чека или ссылку:');
   }
 });
 
-// --- ОБРАБОТКА ВВОДА (Промокод, Админка) ---
+// Создание чека (с красивой картинкой)
 bot.on('message', async (msg) => {
-  if (!msg.text || msg.text.startsWith('/')) return;
   const userId = String(msg.from.id);
   const state = states.get(userId);
   if (!state) return;
 
-  // Промокод
-  if (state.type === 'await_promo') {
-    states.delete(userId);
-    const code = msg.text.trim().toUpperCase();
-    const { data: promo } = await supabase.from('smaster_promocodes').select('*').eq('code', code).limit(1);
-    if (!promo || promo.length === 0 || promo[0].uses_left <= 0) return bot.sendMessage(msg.chat.id, '❌ Промокод не найден.');
+  if (state.type === 'check_amount') {
+    const amount = Number(msg.text.replace(',', '.'));
+    if (!amount || amount <= 0) return bot.sendMessage(msg.chat.id, '❌ Введи число.');
+    
     const w = await getWallet(userId);
-    const amount = Number(promo[0].amount);
-    await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + amount).toFixed(8) });
-    await supabase.from('smaster_promocodes').update({ uses_left: promo[0].uses_left - 1 }).eq('code', code);
-    await logHistory(userId, 'promo', amount, 'USDT');
-    return bot.sendMessage(msg.chat.id, `✅ Промокод активирован! +${amount} USDT.`, { ...getMenu(true) });
-  }
-
-  // Админ: Выдача баланса
-  if (state.type === 'adm_give_input') {
-    states.delete(userId);
-    const [targetId, amountStr] = msg.text.split(' ');
-    const amount = Number(amountStr);
-    const targetW = await getWallet(targetId);
-    if (!targetW || !amount) return bot.sendMessage(msg.chat.id, '❌ Ошибка в данных.');
-    await updateWallet(targetId, { balance_usdt: (Number(targetW.balance_usdt) + amount).toFixed(8) });
-    return bot.sendMessage(msg.chat.id, `✅ Выдано ${amount} USDT юзеру ${targetId}.`, { ...getMenu(true) });
-  }
-
-  // Админ: Создать промокод
-  if (state.type === 'adm_promo_input') {
-    states.delete(userId);
-    const [code, amountStr] = msg.text.split(' ');
-    const amount = Number(amountStr);
-    if (!code || !amount) return bot.sendMessage(msg.chat.id, '❌ Ошибка в данных.');
-    await supabase.from('smaster_promocodes').insert({ code: code.toUpperCase(), amount, uses_left: 10 });
-    return bot.sendMessage(msg.chat.id, `✅ Промокод ${code} на ${amount} USDT создан (10 активаций).`, { ...getMenu(true) });
-  }
-
-  // Админ: Рассылка
-  if (state.type === 'adm_broadcast_input') {
-    states.delete(userId);
-    const text = msg.text;
-    const { data: users } = await supabase.from('smaster_wallets').select('user_id');
-    let success = 0;
-    for (const u of users) {
-      try { await bot.sendMessage(u.user_id, text); success++; await new Promise(r => setTimeout(r, 50)); } catch (e) {}
+    if (Number(w.balance_usdt) < amount) {
+      states.delete(userId);
+      return bot.sendMessage(msg.chat.id, '❌ Недостаточно средств.', { ...getMenu(true) });
     }
-    return bot.sendMessage(msg.chat.id, `✅ Дошло: ${success}`, { ...getMenu(true) });
+
+    await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) - amount).toFixed(8) });
+    const { data } = await supabase.from('smaster_checks').insert({ creator_id: Number(userId), amount, type: 'personal', limit_activations: 1 }).select();
+    states.delete(userId);
+
+    const me = await bot.getMe();
+    const link = `https://t.me/${me.username}?start=check_${data[0].id}`;
+
+    // Генерируем картинку через Placehold (или можно использовать Canvas)
+    const imageUrl = `https://placehold.co/600x400/0f0715/ff007f/png?text=SMaster+Check%0A%0A${amount}+USDT%0A%0AСсылка:+${link}`;
+
+    await bot.sendPhoto(msg.chat.id, imageUrl, {
+      caption: `🎁 <b>Чек на ${amount} USDT создан!</b>\n\nОтправь эту ссылку другу:\n${link}`,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '📤 Поделиться', url: `https://t.me/share/url?url=${link}` }], [{ text: '⬅️ В меню', callback_data: 'back_to_menu' }]] }
+    });
+  }
+
+  if (state.type === 'check_activate_id') {
+    states.delete(userId);
+    const checkId = msg.text.trim().split('_').pop();
+    const { data: arr } = await supabase.from('smaster_checks').select('*').eq('id', Number(checkId)).limit(1);
+    const check = arr && arr.length > 0 ? arr[0] : null;
+    
+    if (!check || check.status !== 'active') return bot.sendMessage(msg.chat.id, '❌ Чек не найден.');
+    if (String(check.creator_id) === userId) return bot.sendMessage(msg.chat.id, '❌ Нельзя активировать свой чек.');
+
+    await supabase.from('smaster_checks').update({ status: 'claimed', claimed_by: Number(userId) }).eq('id', check.id);
+    const w = await getWallet(userId);
+    await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + Number(check.amount)).toFixed(8) });
+    
+    return bot.sendMessage(msg.chat.id, `🎉 <b>Чек активирован!</b>\n\n+${check.amount} USDT`, { ...getMenu(true), parse_mode: 'HTML' });
+  }
+});bot.on('callback_query', async (query) => {
+  const data = query.data;
+  const chatId = query.message.chat.id;
+  const userId = query.from.id;
+
+  // P2P
+  if (data === 'menu_p2p') {
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+    return bot.sendMessage(chatId, '🎲 <b>P2P Маркет</b>', {
+      reply_markup: { inline_keyboard: [
+        [{ text: '🛒 Купить USDT', callback_data: 'p2p_buy' }],
+        [{ text: '➕ Продать USDT', callback_data: 'p2p_create' }],
+        [{ text: '📢 Мои объявления', callback_data: 'p2p_my' }],
+        [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]
+      ]}, parse_mode: 'HTML'
+    });
+  }
+
+  if (data === 'p2p_buy') {
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+    const { data: ads } = await supabase.from('smaster_p2p_ads').select('*').eq('status', 'active').neq('seller_id', userId).limit(10);
+    if (!ads || ads.length === 0) return bot.sendMessage(chatId, '🛒 Нет объявлений.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_p2p' }]] } });
+    const buttons = ads.map(ad => [{ text: `#${ad.id} · ${ad.amount} USDT · ${ad.price} ${ad.currency}`, callback_data: `p2p_view_${ad.id}` }]);
+    return bot.sendMessage(chatId, '🛒 Выбери:', { reply_markup: { inline_keyboard: buttons } });
+  }
+
+  if (data.startsWith('p2p_view_')) {
+    const id = Number(data.split('_')[2]);
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+    const { data: arr } = await supabase.from('smaster_p2p_ads').select('*').eq('id', id).limit(1);
+    const ad = arr && arr.length > 0 ? arr[0] : null;
+    if (!ad) return bot.sendMessage(chatId, '❌ Ошибка.');
+    const total = Number(ad.amount) * Number(ad.price);
+    return bot.sendMessage(chatId, `📢 <b>Объявление #${ad.id}</b>\n\nUSDT: ${ad.amount}\nЦена: ${ad.price} ${ad.currency}\nИтого: ${total}`, {
+      reply_markup: { inline_keyboard: [[{ text: '✅ Купить', callback_data: `p2p_buy_${ad.id}`, style: 'success' }], [{ text: '⬅️ Назад', callback_data: 'p2p_buy' }]] }
+    });
+  }
+
+  if (data.startsWith('p2p_buy_')) {
+    const id = Number(data.split('_')[2]);
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+    const { data: arr } = await supabase.from('smaster_p2p_ads').select('*').eq('id', id).limit(1);
+    const ad = arr && arr.length > 0 ? arr[0] : null;
+    const w = await getWallet(userId);
+    const seller = await getWallet(ad.seller_id);
+    const amount = Number(ad.amount);
+    const total = amount * Number(ad.price);
+    
+    if (Number(w.balance_ton) < total) return bot.sendMessage(chatId, '❌ Мало TON.');
+    
+    await updateWallet(userId, { balance_ton: (Number(w.balance_ton) - total).toFixed(8), balance_usdt: (Number(w.balance_usdt) + amount).toFixed(8) });
+    await updateWallet(ad.seller_id, { balance_ton: (Number(seller.balance_ton) + total).toFixed(8), balance_usdt: (Number(seller.balance_usdt) - amount).toFixed(8) });
+    await supabase.from('smaster_p2p_ads').update({ status: 'completed', buyer_id: userId }).eq('id', ad.id);
+    
+    return bot.sendMessage(chatId, `✅ Сделка завершена! +${amount} USDT`, { ...getMenu(true) });
+  }
+
+  if (data === 'p2p_create') {
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+    states.set(userId, { type: 'p2p_amount' });
+    return bot.sendMessage(chatId, 'Сколько USDT продаешь?');
+  }
+
+  // Инвойсы (Счета)
+  if (data === 'menu_invoices') {
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+    return bot.sendMessage(chatId, '📄 <b>Счета (Инвойсы)</b>\n\nСоздай счет для приема оплаты.', {
+      reply_markup: { inline_keyboard: [[{ text: '➕ Создать счет', callback_data: 'inv_create' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }
+    });
+  }
+  if (data === 'inv_create') {
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+    states.set(userId, { type: 'inv_amount' });
+    return bot.sendMessage(chatId, 'Введи сумму для счета:');
   }
 });const app = express();
 app.use(helmet());
-app.use(rateLimit({ windowMs: 60 * 1000, max: 100 }));
-app.use(express.json({ limit: '10kb' }));
+app.use(express.json());
 
+// API для Mini App
 app.get('/api/user/:id', async (req, res) => {
-  try {
-    const w = await getWallet(req.params.id);
-    if (!w) return res.status(404).json({ error: 'Not found' });
-    res.json({ balance_usdt: w.balance_usdt, balance_ton: w.balance_ton, balance_eth: w.balance_eth, ton_deposit_address: w.ton_deposit_address, eth_deposit_address: w.eth_deposit_address });
-  } catch (e) { res.status(500).json({ error: 'Server error' }); }
+  const w = await getWallet(req.params.id);
+  if (!w) return res.status(404).json({ error: 'Not found' });
+  res.json({ balance_usdt: w.balance_usdt, balance_ton: w.balance_ton, ton_address: w.ton_deposit_address, eth_address: w.eth_deposit_address });
 });
 
 app.get('/app', (req, res) => {
@@ -283,115 +246,32 @@ app.get('/app', (req, res) => {
     <!DOCTYPE html>
     <html lang="ru">
     <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+      <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
       <script src="https://telegram.org/js/telegram-web-app.js"></script>
-      <title>SMaster</title>
       <style>
-        :root { --bg-dark: #0f0715; --bg-card: #1c102b; --accent-pink: #ff007f; --text-main: #ffffff; --text-muted: #9e8bb5; }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; user-select: none; }
-        body { background-color: var(--bg-dark); color: var(--text-main); padding: 20px; padding-bottom: 80px; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
-        .logo { font-size: 26px; font-weight: 900; background: linear-gradient(90deg, var(--accent-pink), #8a2be2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .avatar { width: 44px; height: 44px; border-radius: 50%; background: linear-gradient(135deg, var(--accent-pink), #8a2be2); display: flex; justify-content: center; align-items: center; font-weight: bold; }
-        .balance-card { background: var(--bg-card); border-radius: 24px; padding: 24px; margin-bottom: 20px; border: 1px solid rgba(255, 0, 127, 0.1); }
-        .balance-title { font-size: 14px; color: var(--text-muted); margin-bottom: 8px; }
-        .balance-amount { font-size: 40px; font-weight: 800; }
-        .balance-amount span { color: #00ff88; }
-        .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
-        .btn { background: var(--bg-card); border: 1px solid rgba(255, 0, 127, 0.1); border-radius: 18px; padding: 16px 8px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer; }
-        .btn:active { transform: scale(0.95); background: #2a1840; }
-        .btn .icon { font-size: 24px; }
-        .btn .label { font-size: 12px; color: var(--text-muted); }
-        .section-title { font-size: 18px; font-weight: 700; margin-bottom: 16px; }
-        .coin-list { background: var(--bg-card); border-radius: 20px; padding: 8px; margin-bottom: 24px; }
-        .coin-item { display: flex; justify-content: space-between; padding: 16px; border-bottom: 1px solid rgba(255,255,255,0.05); }
-        .coin-item:last-child { border-bottom: none; }
-        .coin-info { display: flex; align-items: center; gap: 12px; }
-        .coin-icon { width: 36px; height: 36px; border-radius: 50%; background: rgba(255,255,255,0.1); display: flex; justify-content: center; align-items: center; font-size: 18px; }
-        .coin-name { font-weight: 600; }
-        .coin-amount { font-weight: 700; text-align: right; }
-        .address-card { background: var(--bg-card); border-radius: 20px; padding: 20px; margin-bottom: 16px; }
-        .address-title { font-size: 14px; color: var(--text-muted); margin-bottom: 12px; display: flex; justify-content: space-between; }
-        .address-box { background: #09040d; padding: 14px; border-radius: 12px; font-family: monospace; font-size: 13px; word-break: break-all; color: var(--accent-pink); text-align: center; border: 1px solid rgba(255,0,127,0.2); }
-        .copy-btn { background: rgba(255,0,127,0.1); color: var(--accent-pink); border: none; padding: 12px; border-radius: 12px; width: 100%; margin-top: 12px; font-weight: 600; cursor: pointer; }
-        .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(28, 16, 43, 0.95); display: flex; justify-content: space-around; padding: 16px 0; border-top: 1px solid rgba(255,0,127,0.1); backdrop-filter: blur(10px); }
-        .nav-item { display: flex; flex-direction: column; align-items: center; gap: 4px; color: var(--text-muted); font-size: 12px; cursor: pointer; }
-        .nav-item .nav-icon { font-size: 22px; }
-        .nav-item.active { color: var(--accent-pink); }
-        .screen { display: none; }
-        .screen.active { display: block; animation: fadeIn 0.3s; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        body { background: #0f0715; color: white; font-family: sans-serif; padding: 20px; }
+        .card { background: #1c102b; padding: 20px; border-radius: 20px; margin-bottom: 15px; border: 1px solid #ff007f; }
+        .btn { background: #ff007f; color: white; padding: 15px; border-radius: 10px; text-align: center; margin-top: 10px; }
+        .addr { background: #000; padding: 10px; font-family: monospace; border-radius: 5px; color: #00ff88; word-break: break-all; }
+        h1 { color: #ff007f; }
       </style>
     </head>
     <body>
-      <div id="screen-main" class="screen active">
-        <div class="header"><div class="logo">SMaster</div><div class="avatar" id="user-avatar">S</div></div>
-        <div class="balance-card"><div class="balance-title">Общий баланс</div><div class="balance-amount"><span id="total-balance">0.00</span> <span style="font-size:24px;color:white;">USDT</span></div></div>
-        <div class="grid">
-          <div class="btn" onclick="showScreen('screen-deposit')"><div class="icon">💳</div><div class="label">Пополнить</div></div>
-          <div class="btn" onclick="showScreen('screen-p2p')"><div class="icon">🎲</div><div class="label">P2P</div></div>
-          <div class="btn" onclick="showScreen('screen-checks')"><div class="icon">🧾</div><div class="label">Чеки</div></div>
-          <div class="btn" onclick="alert('В разработке')"><div class="icon">📤</div><div class="label">Вывести</div></div>
-        </div>
-        <div class="section-title">Активы</div>
-        <div class="coin-list">
-          <div class="coin-item"><div class="coin-info"><div class="coin-icon" style="background:#26a17b;">💵</div><div><div class="coin-name">Tether</div><div style="font-size:12px;color:#888;">USDT</div></div></div><div class="coin-amount" id="coin-usdt">0.00</div></div>
-          <div class="coin-item"><div class="coin-info"><div class="coin-icon" style="background:#0098ea;">💎</div><div><div class="coin-name">Toncoin</div><div style="font-size:12px;color:#888;">TON</div></div></div><div class="coin-amount" id="coin-ton">0.00</div></div>
-          <div class="coin-item"><div class="coin-info"><div class="coin-icon" style="background:#627eea;">🔷</div><div><div class="coin-name">Ethereum</div><div style="font-size:12px;color:#888;">ETH</div></div></div><div class="coin-amount" id="coin-eth">0.00</div></div>
-        </div>
-      </div>
-
-      <div id="screen-deposit" class="screen">
-        <div class="header"><div class="logo" style="font-size:20px;">Пополнение</div><div style="color:var(--accent-pink);cursor:pointer;" onclick="showScreen('screen-main')">✕</div></div>
-        <div class="address-card"><div class="address-title"><span>TON</span><span style="color:#00ff88;">Сеть: TON</span></div><div class="address-box" id="dep-ton">Загрузка...</div><button class="copy-btn" onclick="copyText('dep-ton')">Копировать</button></div>
-        <div class="address-card"><div class="address-title"><span>ETH</span><span style="color:#8a2be2;">Сеть: ERC20</span></div><div class="address-box" id="dep-eth">Загрузка...</div><button class="copy-btn" onclick="copyText('dep-eth')">Копировать</button></div>
-      </div>
-
-      <div id="screen-p2p" class="screen"><div class="header"><div class="logo" style="font-size:20px;">P2P</div><div style="cursor:pointer;" onclick="showScreen('screen-main')">✕</div></div><div class="balance-card" style="text-align:center;"><div style="font-size:40px;">🎲</div><div>P2P Маркет</div><div style="font-size:14px;color:#888;">Сделки доступны в боте.</div></div></div>
-      <div id="screen-checks" class="screen"><div class="header"><div class="logo" style="font-size:20px;">Чеки</div><div style="cursor:pointer;" onclick="showScreen('screen-main')">✕</div></div><div class="balance-card" style="text-align:center;"><div style="font-size:40px;">🧾</div><div>Чеки</div><div style="font-size:14px;color:#888;">Создание чеков доступно в боте.</div></div></div>
-
-      <div class="bottom-nav">
-        <div class="nav-item active" onclick="showScreen('screen-main')"><div class="nav-icon">🏠</div>Главная</div>
-        <div class="nav-item" onclick="showScreen('screen-p2p')"><div class="nav-icon">🎲</div>P2P</div>
-        <div class="nav-item" onclick="showScreen('screen-checks')"><div class="nav-icon">🧾</div>Чеки</div>
-        <div class="nav-item" onclick="showScreen('screen-deposit')"><div class="nav-icon">💳</div>Пополнить</div>
-      </div>
+      <h1>SMaster</h1>
+      <div class="card"><div>Баланс USDT</div><div style="font-size:30px;color:#00ff88;" id="usdt">0.00</div></div>
+      <div class="card"><div>TON Адрес</div><div class="addr" id="ton">Загрузка...</div></div>
+      <div class="card"><div>ETH Адрес</div><div class="addr" id="eth">Загрузка...</div></div>
       <script>
-        const tg = window.Telegram.WebApp; tg.expand(); tg.setHeaderColor('#0f0715');
-        if (tg.initDataUnsafe && tg.initDataUnsafe.user) document.getElementById('user-avatar').innerText = tg.initDataUnsafe.user.first_name.charAt(0);
-        async function loadData() { 
-          try { const userId = tg.initDataUnsafe?.user?.id; if (!userId) return; const res = await fetch('/api/user/' + userId); const data = await res.json(); 
-          if (data) { 
-            document.getElementById('total-balance').innerText = Number(data.balance_usdt || 0).toFixed(2); 
-            document.getElementById('coin-usdt').innerText = Number(data.balance_usdt || 0).toFixed(2); 
-            document.getElementById('coin-ton').innerText = Number(data.balance_ton || 0).toFixed(2); 
-            document.getElementById('coin-eth').innerText = Number(data.balance_eth || 0).toFixed(4);
-            document.getElementById('dep-ton').innerText = data.ton_deposit_address || 'Ошибка'; 
-            document.getElementById('dep-eth').innerText = data.eth_deposit_address || 'Ошибка'; 
-          } } catch (e) { console.error(e); } 
-        }
-        function showScreen(id) { 
-          document.querySelectorAll('.screen').forEach(s => s.classList.remove('active')); 
-          document.getElementById(id).classList.add('active'); 
-          document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-          if(id === 'screen-main') document.querySelectorAll('.nav-item')[0].classList.add('active');
-          if(id === 'screen-p2p') document.querySelectorAll('.nav-item')[1].classList.add('active');
-          if(id === 'screen-checks') document.querySelectorAll('.nav-item')[2].classList.add('active');
-          if(id === 'screen-deposit') document.querySelectorAll('.nav-item')[3].classList.add('active');
-        }
-        function copyText(id) { 
-          const text = document.getElementById(id).innerText; 
-          if (text === 'Ошибка' || text === 'Загрузка...') return; 
-          navigator.clipboard.writeText(text).then(() => tg.showAlert('Скопировано!')); 
-        }
-        loadData();
+        const tg = window.Telegram.WebApp; tg.expand();
+        fetch('/api/user/' + tg.initDataUnsafe.user.id).then(r => r.json()).then(data => {
+          document.getElementById('usdt').innerText = data.balance_usdt || 0;
+          document.getElementById('ton').innerText = data.ton_address || 'Нет';
+          document.getElementById('eth').innerText = data.eth_address || 'Нет';
+        });
       </script>
     </body>
     </html>
   `);
 });
 
-app.get('/', (req, res) => res.send('SMaster is running securely'));
-app.listen(process.env.PORT || 3000, () => console.log('🌐 HTTP listening'));
-console.log('🤖 SMaster Enterprise запущен!');
+app.listen(process.env.PORT || 3000, () => console.log('🚀 Server ready'));
