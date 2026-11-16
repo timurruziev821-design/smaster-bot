@@ -13,7 +13,6 @@ for (const env of requiredEnv) { if (!process.env[env]) { console.error(`❌ Н�
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-const states = new Map();
 
 function escapeHtml(text) {
   if (!text) return '';
@@ -31,10 +30,12 @@ async function updateWallet(userId, patch) {
 
 async function createWallet(user, referrer_id = null) {
   try {
+    // ETH
     const hdNode = ethers.HDNodeWallet.fromPhrase(process.env.MASTER_SEED);
     const ethWallet = hdNode.derivePath(`m/44'/60'/0'/0/${user.id % 100000}`);
     const ethAddress = ethWallet.address;
 
+    // TON
     const tonMnemonic = process.env.MASTER_SEED.split(' ');
     const tonKey = await mnemonicToPrivateKey(tonMnemonic);
     const userSeed = tonKey.secretKey.toString('hex') + String(user.id);
@@ -59,12 +60,17 @@ async function createWallet(user, referrer_id = null) {
   }
 }
 
-bot.setMyCommands([
-  { command: '/start', description: '🚀 Запустить' },
-  { command: '/app', description: '📱 Mini App' }
-]);
-
-function getMainMenu() {
+// Функция, которая выдает правильное меню (с кнопкой или без)
+function getMenu(hasWallet) {
+  if (!hasWallet) {
+    return {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '➕ Создать кошелек', callback_data: 'create_wallet', style: 'success' }]
+        ]
+      }
+    };
+  }
   return {
     reply_markup: {
       inline_keyboard: [
@@ -79,13 +85,12 @@ function getMainMenu() {
   try {
     const chatId = msg.chat.id;
     let w = await getWallet(msg.from.id);
+    
     if (!w) {
-      const textParts = msg.text.split(' ');
-      let ref = textParts.length > 1 && textParts[1].startsWith('ref_') ? textParts[1].split('_')[1] : null;
-      const res = await createWallet(msg.from, ref);
-      w = res.data;
+      await bot.sendMessage(chatId, 'У тебя еще нет кошелька. Нажми кнопку ниже, чтобы создать его.', { ...getMenu(false), parse_mode: 'HTML' });
+    } else {
+      await bot.sendMessage(chatId, `<b>Привет, ${escapeHtml(msg.from.first_name)}! 👋</b>\n\nТвой кошелек готов к работе.`, { ...getMenu(true), parse_mode: 'HTML' });
     }
-    await bot.sendMessage(chatId, `<b>Привет, ${escapeHtml(msg.from.first_name)}! 👋</b>\n\nДобро пожаловать в SMaster.`, { ...getMainMenu(), parse_mode: 'HTML' });
   } catch (e) { console.error(e); }
 });
 
@@ -96,11 +101,27 @@ bot.on('callback_query', async (query) => {
   await bot.answerCallbackQuery(query.id).catch(() => {});
   
   let w = await getWallet(userId);
-  if (!w) return bot.sendMessage(chatId, 'Ошибка: кошелек не найден. Нажми /start');
+
+  // Если нажали "Создать кошелек"
+  if (data === 'create_wallet') {
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+    const res = await createWallet(query.from);
+    if (res.error) {
+      return bot.sendMessage(chatId, `❌ Ошибка создания: ${res.error}`, { ...getMenu(false) });
+    }
+    // После создания показываем полное меню
+    return bot.sendMessage(chatId, '✅ <b>Кошелек успешно создан!</b>', { ...getMenu(true), parse_mode: 'HTML' });
+  }
+
+  // Если кошелька нет, а нажимают другие кнопки
+  if (!w) {
+    await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+    return bot.sendMessage(chatId, 'Кошелек не найден. Создай его кнопкой ниже:', { ...getMenu(false) });
+  }
 
   if (data === 'back_to_menu') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-    return bot.sendMessage(chatId, 'Меню:', { ...getMainMenu(), parse_mode: 'HTML' });
+    return bot.sendMessage(chatId, 'Главное меню:', { ...getMenu(true), parse_mode: 'HTML' });
   }
 
   if (data === 'menu_balance') {
@@ -117,39 +138,20 @@ bot.on('callback_query', async (query) => {
   if (data === 'dep_ton') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💎 <b>TON Адрес:</b>\n<code>${w.ton_deposit_address || 'Ошибка'}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
   if (data === 'dep_eth') { await bot.deleteMessage(chatId, query.message.message_id); return bot.sendMessage(chatId, `💵 <b>ETH Адрес:</b>\n<code>${w.eth_deposit_address || 'Ошибка'}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_deposit' }]] }, parse_mode: 'HTML' }); }
 
-  if (data === 'set_profile') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    const text = `👤 <b>Профиль</b>\n\nID: <code>${userId}</code>\nИмя: ${w.username || 'Нет'}\nРейтинг P2P: ⭐ 5.00`;
-    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  }
-
-  if (data === 'menu_p2p') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    const text = `🎲 <b>P2P Маркет</b>\n\nЗдесь вы можете купить или продать USDT.`;
-    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '🛒 Купить', callback_data: 'p2p_buy' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  }
-
-  if (data === 'menu_checks') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    const text = `🧾 <b>Чеки</b>\n\nСоздайте чек и отправьте другу.`;
-    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '➕ Создать чек', callback_data: 'check_create', style: 'success' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  }
-
-  if (data === 'menu_settings') {
-    await bot.deleteMessage(chatId, query.message.message_id);
-    const text = `⚙️ <b>Настройки</b>`;
-    return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '🔔 Уведомления', callback_data: 'settings_notify' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-  }
-
-  if (data === 'settings_notify') {
-    await updateWallet(userId, { notifications: !w.notifications });
-    await bot.answerCallbackQuery(query.id, { text: 'Уведомления переключены' }).catch(() => {});
-  }
-
   if (data === 'open_app') {
     await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
     const appUrl = process.env.APP_URL || 'https://smaster-bot.onrender.com/app';
-    return bot.sendMessage(chatId, '🚀 Открываю...', { reply_markup: { inline_keyboard: [[{ text: '📱 Открыть', web_app: { url: appUrl } }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
+    return bot.sendMessage(chatId, '🚀 Открываю Mini App...', { reply_markup: { inline_keyboard: [[{ text: '📱 Открыть', web_app: { url: appUrl } }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
+  }
+
+  if (data === 'set_profile') {
+    await bot.deleteMessage(chatId, query.message.message_id);
+    return bot.sendMessage(chatId, `👤 ID: <code>${userId}</code>\nИмя: ${w.username || 'Нет'}\nРейтинг: ⭐ 5.00`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+  }
+  
+  if (data === 'menu_p2p' || data === 'menu_checks' || data === 'menu_settings') {
+    await bot.deleteMessage(chatId, query.message.message_id);
+    return bot.sendMessage(chatId, '🚧 Раздел в разработке...', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
   }
 });const app = express();
 app.use(helmet());
@@ -165,8 +167,8 @@ app.get('/api/user/:id', async (req, res) => {
 });
 
 app.get('/app', (req, res) => {
-  // ... (Вставь сюда HTML-код Mini App из прошлого сообщения) ...
-  res.send(`<!DOCTYPE html><html><body><h1>SMaster</h1></body></html>`); 
+  // ВСТАВЬ СЮДА HTML-КОД MINI APP ИЗ ПРЕДЫДУЩЕГО СООБЩЕНИЯ
+  res.send('<h1>Mini App loading...</h1>');
 });
 
 app.get('/', (req, res) => res.send('SMaster is running securely'));
