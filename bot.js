@@ -67,10 +67,6 @@ const CURRENCIES = ['USDT', 'XROCK', 'USDC', 'GRAM', 'TRX', 'SOL', 'BTC', 'ETH',
 const DISPLAY_CURRENCIES = ['USD', 'RUB', 'EUR', 'UAH', 'KZT'];
 const CURRENCY_RATES = { USD: 1, RUB: 92.5, EUR: 0.92, UAH: 41.2, KZT: 485.0 };
 
-// ==========================================
-// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-// ==========================================
-
 function escapeHTML(value) {
     return String(value ?? '').replace(/[&<>"']/g, char => ({
         '&': '&amp;',
@@ -146,10 +142,6 @@ async function dbQuery(promise) {
     return data;
 }
 
-// ==========================================
-// РАБОТА С ПОЛЬЗОВАТЕЛЯМИ И БАЛАНСОМ (SUPABASE)
-// ==========================================
-
 async function getUser(userId) {
     return await dbQuery(
         supabase
@@ -208,7 +200,7 @@ async function logHistory(userId, type, amount, currency) {
 async function updateBalance(userId, currency, delta, historyType) {
     const col = currency === 'TON' ? 'balance_ton' : currency === 'USDT' ? 'balance_usdt' : null;
     if (!col) {
-        throw new Error(`Валюта ${currency} не поддерживается для баланса`);
+        throw new Error(`Валюта ${currency} не поддерживается`);
     }
 
     const wallet = await getUser(userId);
@@ -236,10 +228,6 @@ async function updateBalance(userId, currency, delta, historyType) {
 
     return nextBalance;
 }
-
-// ==========================================
-// ИНИЦИАЛИЗАЦИЯ TON MAINNET
-// ==========================================
 
 async function initTonWallet() {
     try {
@@ -277,10 +265,6 @@ function getTonContract() {
     }
     return tonClient.open(tonWallet);
 }
-
-// ==========================================
-// МЕНЮ (ОБЪЯВЛЕНЫ ДО ВЫЗОВА)
-// ==========================================
 
 function getMainMenu() {
     return {
@@ -344,276 +328,13 @@ async function showMainMenu(chatId, userId, messageId = null) {
     }
 }
 
-
----
-
-### Часть 2: Настройки, рефералка, обработчики команд/кнопок/текста, Mini App и запуск сервера
-
-Скопируйте эту часть сразу после первой в тот же файл `index.js`:
-
-```javascript
-// ==========================================
-// НАСТРОЙКИ И РЕФЕРАЛЬНАЯ ПРОГРАММА
-// ==========================================
-
-async function showSettings(chatId, messageId = null) {
-    return deleteAndSend(chatId, messageId, '⚙️ <b>Настройки SMaster</b>', getSettingsMenu());
-}
-
-async function updateUserSetting(userId, field, value) {
-    const allowed = ['display_currency', 'notifications', 'language', 'is_verified'];
-    if (!allowed.includes(field)) {
-        throw new Error('Недопустимый параметр настройки');
-    }
-
-    return await dbQuery(
-        supabase
-            .from('smaster_wallets')
-            .update({ [field]: value })
-            .eq('user_id', Number(userId))
-            .select()
-    );
-}
-
-async function showCurrencies(chatId, messageId = null) {
-    const keyboard = DISPLAY_CURRENCIES.map(currency => [{
-        text: currency,
-        callback_data: `setcurrency_${currency}`
-    }]);
-    keyboard.push([{ text: '⬅️ Назад', callback_data: 'settings' }]);
-
-    return deleteAndSend(chatId, messageId, '💱 <b>Выберите валюту отображения:</b>', {
-        reply_markup: { inline_keyboard: keyboard }
-    });
-}
-
-async function toggleNotifications(chatId, userId, messageId = null) {
+async function showWallet(chatId, userId, messageId = null) {
     try {
         const wallet = await getUser(userId);
-        const next = !wallet.notifications;
-        await updateUserSetting(userId, 'notifications', next);
+        if (!wallet) throw new Error('Кошелёк не найден');
 
-        return deleteAndSend(
-            chatId,
-            messageId,
-            next ? '🔔 Уведомления <b>ВКЛЮЧЕНЫ</b>.' : '🔕 Уведомления <b>ВЫКЛЮЧЕНЫ</b>.',
-            getSettingsMenu()
-        );
-    } catch (e) {
-        return send(chatId, `❌ Ошибка БД: ${escapeHTML(e.message)}`);
-    }
-}
-
-async function showLanguages(chatId, messageId = null) {
-    return deleteAndSend(chatId, messageId, '🌐 <b>Выберите язык интерфейса:</b>', {
-        reply_markup: {
-            inline_keyboard: [
-                [
-                    { text: '🇷🇺 Русский', callback_data: 'lang_RU' },
-                    { text: '🇬🇧 English', callback_data: 'lang_EN' }
-                ],
-                [{ text: '⬅️ Назад', callback_data: 'settings' }]
-            ]
-        }
-    });
-}
-
-async function showReferral(chatId, userId, messageId = null) {
-    try {
-        const username = await getBotUsername();
-        const link = `https://t.me{username}?start=ref_${userId}`;
-
-        return deleteAndSend(
-            chatId,
-            messageId,
-            `👥 <b>Реферальная программа SMaster</b>\n\n` +
-            `Ваша персональная ссылка:\n<code>${escapeHTML(link)}</code>\n\n` +
-            `Приглашайте друзей и развивайте экосистему SMaster!`,
-            {
-                reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'home' }]] }
-            }
-        );
-    } catch (e) {
-        return send(chatId, `❌ Ошибка: ${escapeHTML(e.message)}`);
-    }
-}
-
-// ==========================================
-// ОБРАБОТЧИКИ /START И DEEP LINKS
-// ==========================================
-
-bot.onText(/^\/start (.+)/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const userId = msg.from.id;
-    const parameter = String(match[1] || '').trim();
-
-    try {
-        await ensureUser(msg.from);
-        clearState(userId);
-
-        if (parameter.startsWith('check_')) {
-            const checkId = parameter.slice(6);
-            if (!checkId) return send(chatId, '❌ Неверная ссылка на чек.');
-            return activateCheck(chatId, userId, checkId);
-        }
-
-        if (parameter.startsWith('invoice_')) {
-            const invoiceId = parameter.slice(8);
-            if (!invoiceId) return send(chatId, '❌ Неверная ссылка на счёт.');
-            return showInvoiceConfirmation(chatId, userId, invoiceId);
-        }
-
-        if (parameter.startsWith('ref_')) {
-            return showMainMenu(chatId, userId);
-        }
-
-        return showMainMenu(chatId, userId);
-    } catch (e) {
-        return send(chatId, `❌ Ошибка БД: ${escapeHTML(e.message)}`);
-    }
-});
-
-bot.onText(/^\/start$/, async msg => {
-    try {
-        await ensureUser(msg.from);
-        clearState(msg.from.id);
-        return showMainMenu(msg.chat.id, msg.from.id);
-    } catch (e) {
-        return send(msg.chat.id, `❌ Ошибка БД: ${escapeHTML(e.message)}`);
-    }
-});
-
-bot.onText(/^\/cancel$/, async msg => {
-    clearState(msg.from.id);
-    await send(msg.chat.id, '❌ Текущее действие отменено.');
-    return showMainMenu(msg.chat.id, msg.from.id);
-});
-
-// ==========================================
-// ЕДИНЫЙ ОБРАБОТЧИК CALLBACK КНОПОК
-// ==========================================
-
-bot.on('callback_query', async query => {
-    // ОБЯЗАТЕЛЬНО вызываем первым действием
-    try {
-        await bot.answerCallbackQuery(query.id);
-    } catch (e) {
-        console.error('answerCallbackQuery error:', e.message);
-    }
-
-    const userId = query.from.id;
-    const chatId = query.message?.chat?.id;
-    const messageId = query.message?.message_id;
-    if (!chatId) return;
-
-    const data = query.data || '';
-
-    try {
-        await ensureUser(query.from);
-
-        if (data === 'home') {
-            clearState(userId);
-            return showMainMenu(chatId, userId, messageId);
-        }
-
-        if (data === 'wallet') return showWallet(chatId, userId, messageId);
-        if (data === 'deposit') return showDeposit(chatId, userId, messageId);
-
-        if (data === 'withdraw') {
-            setState(userId, 'withdraw_address');
-            return deleteAndSend(chatId, messageId, '📤 Введите <b>TON-адрес</b> получателя (48 символов):', {
-                reply_markup: { inline_keyboard: [[{ text: '❌ Отмена', callback_data: 'home' }]] }
-            });
-        }
-
-        // ЧЕКИ
-        if (data === 'checks') return showChecks(chatId, messageId);
-
-        if (data === 'check_create') {
-            setState(userId, 'check_amount');
-            return deleteAndSend(chatId, messageId, '💵 Введите сумму чека в <b>USDT</b>:', {
-                reply_markup: { inline_keyboard: [[{ text: '❌ Отмена', callback_data: 'checks' }]] }
-            });
-        }
-
-        if (data === 'check_activate') {
-            setState(userId, 'check_id');
-            return deleteAndSend(chatId, messageId, '🎁 Введите <b>ID чека</b> для активации:', {
-                reply_markup: { inline_keyboard: [[{ text: '❌ Отмена', callback_data: 'checks' }]] }
-            });
-        }
-
-        // СЧЕТА
-        if (data === 'invoices') return showInvoiceMenu(chatId, messageId);
-        if (data === 'invoice_create') return showInvoiceCurrencies(chatId, messageId);
-        if (data === 'invoice_mine') return showMyInvoices(chatId, userId, messageId);
-
-        if (data.startsWith('invcur_')) {
-            const currency = data.slice(7);
-            if (!CURRENCIES.includes(currency)) return send(chatId, '❌ Неподдерживаемая валюта.');
-            return showInvoiceAmount(chatId, currency, userId, messageId);
-        }
-
-        if (data.startsWith('invamount_')) {
-            const amount = Number(data.slice(10));
-            if (isNaN(amount) || !validAmount(amount)) return send(chatId, '❌ Некорректная сумма.');
-
-            const state = getState(userId);
-            if (!state || state.action !== 'invoice_amount') {
-                return deleteAndSend(chatId, messageId, '❌ Сессия устарела.', getMainMenu());
-            }
-
-            clearState(userId);
-            if (messageId) await bot.deleteMessage(chatId, messageId).catch(() => {});
-            return createInvoice(chatId, userId, amount, state.data.currency);
-        }
-
-        if (data === 'invoice_yes') return payInvoice(chatId, userId, messageId);
-
-        if (data === 'invoice_no') {
-            clearState(userId);
-            return deleteAndSend(chatId, messageId, '❌ Оплата счёта отменена.', getMainMenu());
-        }
-
-        // P2P
-        if (data === 'p2p') return showP2P(chatId, messageId);
-        if (data === 'p2p_buy') return showP2PAds(chatId, messageId);
-        if (data === 'p2p_mine') return showMyAds(chatId, userId, messageId);
-
-        if (data === 'p2p_sell') {
-            setState(userId, 'p2p_amount');
-            return deleteAndSend(chatId, messageId, '📦 Введите <b>количество монет</b> для продажи:', {
-                reply_markup: { inline_keyboard: [[{ text: '❌ Отмена', callback_data: 'p2p' }]] }
-            });
-        }
-
-        if (data.startsWith('p2pcurrency_')) {
-            const currency = data.slice(12);
-            if (!['USDT', 'TON'].includes(currency)) return send(chatId, '❌ Неверная валюта.');
-
-            const state = getState(userId);
-            if (!state || state.action !== 'p2p_currency') {
-                return deleteAndSend(chatId, messageId, '❌ Сессия устарела.', getMainMenu());
-            }
-
-            const { amount, price } = state.data;
-            clearState(userId);
-            if (messageId) await bot.deleteMessage(chatId, messageId).catch(() => {});
-            return createP2PAd(chatId, userId, amount, price, currency);
-        }
-
-        if (data.startsWith('p2p_offer_')) {
-            return buyP2PAd(chatId, userId, data.slice(10));
-        }
-
-        // НАСТРОЙКИ И РЕФЕРАЛКА
-        if (data === 'settings') return showSettings(chatId, messageId);
-        if (data === 'currency') return showCurrencies(chatId, messageId);
-        if (data === 'notifications') return toggleNotifications(chatId, userId, messageId);
-        if (data === 'language') return showLanguages(chatId, messageId);
-        if (data === 'referral') return showReferral(chatId, userId, messageId);
-
-        if (data.startsWith('setcurrency_')) {
-            const currency = data.slice(12);
-            if (!DISPLAY_CURRENCIES.includes(currency)) return send(chatId, '❌ Неверная валюта.');
-            await updateUserSetting(userId, 'display_currency', currency);
+        const approxFiat = formatFiat(wallet.balance_usdt, wallet.display_currency);
+        const text =
+            `💼 <b>Ваш кошелёк SMaster</b>\n\n` +
+            `💵 USDT: <b>${formatAmount(wallet.balance_usdt)}</b> (~${escapeHTML(approxFiat)})\n` +
+            `💎 TON: <b>${formatAmount(wallet.balance_ton)}</b>\n\n` +
