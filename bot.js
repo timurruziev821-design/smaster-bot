@@ -14,6 +14,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const ADMIN_ID = String(process.env.ADMIN_ID);
 const MAIN_WALLET_MNEMONIC = (process.env.MAIN_WALLET_MNEMONIC || '').split(' ');
 const states = new Map();
+
 const tonClient = new TonClient({ endpoint: 'https://toncenter.com/api/v2/jsonRPC', apiKey: process.env.TONCENTER_API_KEY });
 
 function escapeHtml(text) { if (!text) return ''; return String(text).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m])); }
@@ -30,6 +31,7 @@ async function updateWallet(userId, patch) {
   try { await supabase.from('smaster_wallets').update(patch).eq('user_id', Number(userId)); } catch (e) {}
 }
 
+// Фоновая проверка депозитов TON
 async function checkTonDeposits() {
   if (MAIN_WALLET_MNEMONIC.length < 24) return;
   try {
@@ -74,10 +76,28 @@ function getMainMenu(hasWallet) {
   };
 }
 
-bot.onText(/^\/start/, async (msg) => {
+// ИСПРАВЛЕНО: Функция настроек теперь объявлена
+function getSettingsMenu(w) {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: `Валюта: ${w.display_currency || 'USD'}`, callback_data: 'set_currency' }],
+        [{ text: `Уведомления: ${w.notifications ? 'ВКЛ' : 'ВЫКЛ'}`, callback_data: 'set_notify' }],
+        [{ text: `Язык: ${w.language === 'ru' ? 'RU' : 'EN'}`, callback_data: 'set_lang' }],
+        [{ text: `Верификация (KYC)`, callback_data: 'set_kyc' }],
+        [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]
+      ]
+    }
+  };
+}
+
+bot.onText(/^\/start$/, async (msg) => {
   try {
     let w = await getWallet(msg.from.id);
-    if (!w) { await supabase.from('smaster_wallets').insert({ user_id: Number(msg.from.id), username: msg.from.username || null }); }
+    if (!w) { 
+      await supabase.from('smaster_wallets').insert({ user_id: Number(msg.from.id), username: msg.from.username || null }); 
+      w = await getWallet(msg.from.id);
+    }
     await bot.sendMessage(msg.chat.id, '👋 Добро пожаловать в <b>SMaster</b>!', { ...getMainMenu(true), parse_mode: 'HTML' });
   } catch (e) { bot.sendMessage(msg.chat.id, '❌ Ошибка базы. Выполни SQL.'); }
 });bot.on('callback_query', async (query) => {
@@ -134,35 +154,23 @@ bot.onText(/^\/start/, async (msg) => {
       const link = `https://t.me/${(await bot.getMe()).username}?start=invoice_${inv[0].id}`;
       return bot.sendMessage(chatId, `📄 <b>Счет на ${amount} ${state.currency} создан!</b>\n\nСсылка:\n<code>${link}</code>`, { ...getMainMenu(true), parse_mode: 'HTML' });
     }
-    
-    // МОИ СЧЕТА
     if (data === 'inv_my') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       const { data: invs } = await supabase.from('smaster_invoices').select('*').eq('creator_id', Number(userId)).order('created_at', { ascending: false }).limit(10);
       if (!invs || invs.length === 0) return bot.sendMessage(chatId, 'У тебя нет счетов.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_invoices' }]] } });
-      
       let text = '📄 <b>Твои счета:</b>\n\n';
-      for (const inv of invs) {
-        const status = inv.status === 'paid' ? '✅ Оплачен' : '⏳ Ожидает';
-        text += `ID: <code>${inv.id}</code> | ${inv.amount} ${inv.currency} | ${status}\n`;
-      }
+      for (const inv of invs) text += `ID: <code>${inv.id}</code> | ${inv.amount} ${inv.currency} | ${inv.status === 'paid' ? '✅ Оплачен' : '⏳ Ожидает'}\n`;
       return bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'menu_invoices' }]] }, parse_mode: 'HTML' });
     }
 
     // --- НАСТРОЙКИ ---
     if (data === 'menu_settings') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, '⚙️ <b>Настройки</b>', { reply_markup: { inline_keyboard: [
-        [{ text: `Валюта: ${w.display_currency || 'USD'}`, callback_data: 'set_currency' }],
-        [{ text: `Уведомления: ${w.notifications ? 'ВКЛ' : 'ВЫКЛ'}`, callback_data: 'set_notify' }],
-        [{ text: `Язык: ${w.language === 'ru' ? 'RU' : 'EN'}`, callback_data: 'set_lang' }],
-        [{ text: `Верификация (KYC)`, callback_data: 'set_kyc' }],
-        [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]
-      ]}, parse_mode: 'HTML' });
+      return bot.sendMessage(chatId, '⚙️ <b>Настройки</b>', { ...getSettingsMenu(w), parse_mode: 'HTML' });
     }
     if (data === 'set_currency') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, 'Выбери валюту отображения:', { reply_markup: { inline_keyboard: [
+      return bot.sendMessage(chatId, 'Выбери валюту:', { reply_markup: { inline_keyboard: [
         [{ text: 'USD', callback_data: 'curr_USD' }, { text: 'RUB', callback_data: 'curr_RUB' }, { text: 'EUR', callback_data: 'curr_EUR' }],
         [{ text: 'UAH', callback_data: 'curr_UAH' }, { text: 'KZT', callback_data: 'curr_KZT' }],
         [{ text: '⬅️ Назад', callback_data: 'menu_settings' }]
@@ -171,30 +179,43 @@ bot.onText(/^\/start/, async (msg) => {
     if (data.startsWith('curr_')) {
       const cur = data.split('_')[1];
       await updateWallet(userId, { display_currency: cur });
+      w.display_currency = cur; // Обновляем локально
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, `✅ Валюта изменена на ${cur}`, { ...getMenuSettings(w), parse_mode: 'HTML' });
+      return bot.sendMessage(chatId, `✅ Валюта: ${cur}`, { ...getSettingsMenu(w) });
     }
     if (data === 'set_notify') {
-      await updateWallet(userId, { notifications: !w.notifications });
+      const newNotify = !w.notifications;
+      await updateWallet(userId, { notifications: newNotify });
+      w.notifications = newNotify; // Обновляем локально
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, `✅ Уведомления: ${!w.notifications ? 'ВКЛ' : 'ВЫКЛ'}`, { ...getMenuSettings(w) });
+      return bot.sendMessage(chatId, `✅ Уведомления: ${newNotify ? 'ВКЛ' : 'ВЫКЛ'}`, { ...getSettingsMenu(w) });
     }
     if (data === 'set_lang') {
-      await updateWallet(userId, { language: w.language === 'ru' ? 'en' : 'ru' });
+      const newLang = w.language === 'ru' ? 'en' : 'ru';
+      await updateWallet(userId, { language: newLang });
+      w.language = newLang; // Обновляем локально
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, `✅ Язык изменен`, { ...getMenuSettings(w) });
+      return bot.sendMessage(chatId, `✅ Язык: ${newLang.toUpperCase()}`, { ...getSettingsMenu(w) });
     }
     if (data === 'set_kyc') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, '🛡 <b>Верификация (KYC)</b>\n\nДля прохождения отправь фото паспорта или селфи.', { reply_markup: { inline_keyboard: [[{ text: '📸 Отправить', callback_data: 'send_kyc' }], [{ text: '⬅️ Назад', callback_data: 'menu_settings' }]] } });
+      return bot.sendMessage(chatId, '🛡 <b>Верификация</b>\n\nОтправь фото паспорта (тестовый режим).', { reply_markup: { inline_keyboard: [[{ text: '📸 Отправить', callback_data: 'send_kyc' }], [{ text: '⬅️ Назад', callback_data: 'menu_settings' }]] }, parse_mode: 'HTML' });
     }
     if (data === 'send_kyc') {
       await updateWallet(userId, { is_verified: true });
-      await bot.answerCallbackQuery(query.id, { text: '✅ Верификация пройдена (тестовый режим)', show_alert: true });
+      await bot.answerCallbackQuery(query.id, { text: '✅ KYC пройден (тест)', show_alert: true });
       return;
     }
 
-    // --- ОСТАЛЬНЫЕ КНОПКИ ---
+    // --- ЧЕКИ ---
+    if (data === 'menu_checks') {
+      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+      return bot.sendMessage(chatId, '🧾 <b>Чеки</b>', { reply_markup: { inline_keyboard: [[{ text: '🎁 Создать чек', callback_data: 'check_create' }], [{ text: '🎫 Активировать', callback_data: 'check_activate' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
+    }
+    if (data === 'check_create') { await bot.deleteMessage(chatId, query.message.message_id).catch(() => {}); states.set(userId, { type: 'check_amount', timestamp: Date.now() }); return bot.sendMessage(chatId, 'Введи сумму USDT для чека:'); }
+    if (data === 'check_activate') { await bot.deleteMessage(chatId, query.message.message_id).catch(() => {}); states.set(userId, { type: 'check_activate_id', timestamp: Date.now() }); return bot.sendMessage(chatId, 'Введи ID чека:'); }
+
+    // --- ОСТАЛЬНОЕ ---
     if (data === 'menu_balance') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       return bot.sendMessage(chatId, `👛 <b>Баланс</b>\n\nUSDT: <code>${Number(w.balance_usdt).toFixed(2)}</code>\nTON: <code>${Number(w.balance_ton).toFixed(2)}</code>`, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
@@ -211,20 +232,6 @@ bot.onText(/^\/start/, async (msg) => {
       states.set(userId, { type: 'withdraw_addr', timestamp: Date.now() });
       return bot.sendMessage(chatId, '⬆️ Введи TON-адрес для вывода:', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] } });
     }
-    if (data === 'menu_checks') {
-      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      return bot.sendMessage(chatId, '🧾 <b>Чеки</b>', { reply_markup: { inline_keyboard: [[{ text: '🎁 Создать чек', callback_data: 'check_create' }], [{ text: '🎫 Активировать', callback_data: 'check_activate' }], [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }]] }, parse_mode: 'HTML' });
-    }
-    if (data === 'check_create') {
-      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      states.set(userId, { type: 'check_amount', timestamp: Date.now() });
-      return bot.sendMessage(chatId, 'Введи сумму USDT для чека:');
-    }
-    if (data === 'check_activate') {
-      await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      states.set(userId, { type: 'check_activate_id', timestamp: Date.now() });
-      return bot.sendMessage(chatId, 'Введи ID чека:');
-    }
     if (data === 'menu_ref') {
       await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
       const link = `https://t.me/${(await bot.getMe()).username}?start=ref_${userId}`;
@@ -234,7 +241,6 @@ bot.onText(/^\/start/, async (msg) => {
   } catch (e) { console.error(e); bot.sendMessage(chatId, `❌ Ошибка: ${e.message}`); }
 });
 
-// ВВОД ТЕКСТА
 bot.on('message', async (msg) => {
   const userId = String(msg.from.id);
   const state = states.get(userId);
@@ -282,19 +288,52 @@ bot.on('message', async (msg) => {
   } catch (e) { console.error(e); states.delete(userId); bot.sendMessage(msg.chat.id, `❌ Ошибка: ${e.message}`); }
 });
 
-// СЕРВЕР И MINI APP
+// ИСПРАВЛЕНО: Обработка Deep Links (Активация по ссылкам)
+bot.onText(/^\/start (.+)/, async (msg, match) => {
+  const param = match[1];
+  const userId = String(msg.from.id);
+  try {
+    if (param.startsWith('invoice_')) {
+      const id = param.split('_')[1];
+      const { data: arr } = await supabase.from('smaster_invoices').select('*').eq('id', Number(id)).limit(1);
+      const inv = arr && arr.length > 0 ? arr[0] : null;
+      if (!inv || inv.status === 'paid') return bot.sendMessage(msg.chat.id, '❌ Счет не найден или оплачен.');
+      
+      const w = await getWallet(userId);
+      // Упрощенно списываем USDT
+      if (Number(w.balance_usdt) < Number(inv.amount)) return bot.sendMessage(msg.chat.id, `❌ Недостаточно USDT для оплаты.`);
+      
+      await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) - Number(inv.amount)).toFixed(8) });
+      const creator = await getWallet(inv.creator_id);
+      if (creator) await updateWallet(inv.creator_id, { balance_usdt: (Number(creator.balance_usdt) + Number(inv.amount)).toFixed(8) });
+      
+      await supabase.from('smaster_invoices').update({ status: 'paid', paid_by: Number(userId) }).eq('id', inv.id);
+      return bot.sendMessage(msg.chat.id, `✅ Счет оплачен! Списано ${inv.amount} ${inv.currency}`, { ...getMainMenu(true) });
+    }
+    
+    if (param.startsWith('check_')) {
+      const id = param.split('_')[1];
+      const { data: arr } = await supabase.from('smaster_checks').select('*').eq('id', Number(id)).limit(1);
+      const check = arr && arr.length > 0 ? arr[0] : null;
+      if (!check || check.status !== 'active') return bot.sendMessage(msg.chat.id, '❌ Чек не найден.');
+      
+      await supabase.from('smaster_checks').update({ status: 'claimed', claimed_by: Number(userId) }).eq('id', check.id);
+      const w = await getWallet(userId);
+      await updateWallet(userId, { balance_usdt: (Number(w.balance_usdt) + Number(check.amount)).toFixed(8) });
+      return bot.sendMessage(msg.chat.id, `🎉 Чек активирован! +${check.amount} USDT`, { ...getMainMenu(true) });
+    }
+  } catch (e) { console.error(e); }
+});
+
 const app = express();
 app.use(helmet());
 app.use(express.json());
-
 app.get('/api/user/:id', async (req, res) => {
   const w = await getWallet(req.params.id);
   if (!w) return res.status(404).json({ error: 'Not found' });
   res.json({ balance_usdt: w.balance_usdt, balance_ton: w.balance_ton });
 });
-
 app.get('/app', (req, res) => {
   res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body { background: #0f0715; color: white; font-family: sans-serif; padding: 20px; } .card { background: #1c102b; padding: 20px; border-radius: 20px; border: 1px solid #ff007f; margin-bottom: 15px; } h1 { color: #ff007f; }</style></head><body><h1>SMaster</h1><div class="card"><div>Баланс USDT</div><div style="font-size:30px;color:#00ff88;" id="usdt">0.00</div></div><div class="card"><div>Баланс TON</div><div style="font-size:30px;color:#0098ea;" id="ton">0.00</div></div><script>const tg = window.Telegram.WebApp; tg.expand(); fetch('/api/user/' + tg.initDataUnsafe.user.id).then(r => r.json()).then(data => { document.getElementById('usdt').innerText = data.balance_usdt || 0; document.getElementById('ton').innerText = data.balance_ton || 0; });</script></body></html>`);
 });
-
 app.listen(process.env.PORT || 3000, () => console.log('🚀 SMaster Server ready'));
